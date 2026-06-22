@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<!-- =========================================================
+     新規論文ページのテンプレート
+     使い方:
+       1. このファイルを papers/<id>/index.html にコピー
+       2. assets/papers.js に同じ id でエントリを追加
+       3. <head>のtitle・.paper-head のメタ情報を差し替え
+       4. 「解説」ペインと「逐語訳」ペインの中身を埋める
+     注意: assets への相対パスは ../../assets/ （papers/<id>/ から2階層上）
+     ========================================================= -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>論文タイトル — 論文解説ノート</title>
+  <link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="home" href="../../index.html">📚 論文解説ノート</a>
+      <nav class="mode-switch" role="tablist" aria-label="表示モード">
+        <button data-mode="explain"   role="tab">📝 解説</button>
+        <button data-mode="translate" role="tab">📖 逐語訳</button>
+      </nav>
+      <a class="back" href="../../index.html">← 一覧へ</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- ===== 論文ヘッダー ===== -->
+    <section class="paper-head">
+      <div class="card-meta">VENUE · YEAR</div>
+      <h1>論文タイトル（原題）</h1>
+      <p class="authors">著者名</p>
+      <p class="authors">和題（任意）</p>
+      <p class="links">
+        <a href="#">arXiv</a> ·
+        <a href="#">PDF</a>
+      </p>
+    </section>
+
+    <!-- ===== 解説モード ===== -->
+    <article class="mode-pane content" data-mode="explain">
+
+      <h2 id="tldr">ひとことで言うと</h2>
+      <div class="note key">
+        <span class="label">CORE IDEA</span>
+        <span class="todo">ここに核心を1〜2文で</span>
+      </div>
+
+      <h2 id="problem">背景と課題</h2>
+      <p><span class="todo">何が難しいのか、既存手法の限界</span></p>
+
+      <h2 id="method">提案手法</h2>
+      <p><span class="todo">アイデアの全体像</span></p>
+      <figure>
+        <div class="fig-placeholder">図（Fig.X）をここに（任意で画像を assets に置く）</div>
+        <figcaption>図の説明</figcaption>
+      </figure>
+
+      <h2 id="results">実験と結果</h2>
+      <p><span class="todo">ベンチマーク・主要指標・比較</span></p>
+
+      <h2 id="takeaway">まとめ・所感</h2>
+      <p><span class="todo">重要点と自分の理解メモ</span></p>
+
+    </article>
+
+    <!-- ===== 逐語訳モード =====
+         原文(.src)と訳(.dst)をセクション単位で対にする。
+         原文を載せない場合は .src を省略してよい。 -->
+    <article class="mode-pane content" data-mode="translate">
+
+      <h2 id="tr-abstract"><span class="tr-sec-num">—</span>Abstract</h2>
+      <div class="tr-block">
+        <p class="src">Original English paragraph ...</p>
+        <p class="dst"><span class="todo">和訳をここに</span></p>
+      </div>
+
+      <h2 id="tr-1"><span class="tr-sec-num">1</span>Introduction</h2>
+      <div class="tr-block">
+        <p class="src">Original English paragraph ...</p>
+        <p class="dst"><span class="todo">和訳をここに</span></p>
+      </div>
+
+      <!-- 以降、節ごとに <h2> + .tr-block を繰り返す -->
+
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap"><a class="back" href="../../index.html">← 一覧へ戻る</a></div>
+  </footer>
+
+  <script src="../../assets/site.js"></script>
+</body>
+</html>

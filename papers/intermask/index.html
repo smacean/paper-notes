@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InterMask — 論文解説ノート</title>
+  <link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="home" href="../../index.html">📚 論文解説ノート</a>
+      <nav class="mode-switch" role="tablist" aria-label="表示モード">
+        <button data-mode="explain"   role="tab">📝 解説</button>
+        <button data-mode="translate" role="tab">📖 逐語訳</button>
+      </nav>
+      <a class="back" href="../../index.html">← 一覧へ</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- ===== 論文ヘッダー ===== -->
+    <section class="paper-head">
+      <div class="card-meta">ICLR 2025 · 2025</div>
+      <h1>InterMask: 3D Human Interaction Generation via Collaborative Masked Modeling</h1>
+      <p class="authors">Muhammad Gohar Javed, Chuan Guo, Li Cheng, Xingyu Li（University of Alberta / Snap Inc.）</p>
+      <p class="authors">InterMask: 協調的マスク予測による3D人間どうしの相互作用生成</p>
+      <p class="links">
+        <a href="https://arxiv.org/abs/2410.10010">arXiv</a> ·
+        <a href="https://gohar-malik.github.io/intermask">Project</a>
+      </p>
+    </section>
+
+    <!-- ===== 解説モード ===== -->
+    <article class="mode-pane content" data-mode="explain">
+
+      <h2 id="tldr">ひとことで言うと</h2>
+      <div class="note key">
+        <span class="label">CORE IDEA</span>
+        テキストから<strong>二人の3D相互作用</strong>（殴り合い・ダンス・受け渡しなど）を生成する枠組み。
+        鍵は2つ。① 各人のモーションを、従来の1Dではなく<strong>「時間 × 体の部位」の2Dトークン地図</strong>にVQ符号化して、
+        相手との位置関係に効く<strong>空間的な手がかり</strong>を1トークンに残す。
+        ② 二人ぶんのトークンを<strong>マスクして同時に予測（協調的マスク予測）</strong>し、Self / 時空間 / Cross-Attention で
+        「自分の中の整合」と「相手との噛み合い」を同時に学ぶ。これでInterHuman/InterXの両方でSOTA。
+      </div>
+      <div class="note">
+        <span class="label">前提キーワード</span>
+        <strong>テキスト→相互作用生成</strong>：「一人が前進して相手を殴る」のような文から、二人ぶんの3D人体の動き（関節の時系列）を作るタスク。
+        <strong>VQ-VAE</strong>：連続したモーションを、コードブック（語彙）の<strong>離散トークン列</strong>に変換するオートエンコーダ。動きを「単語の並び」のように扱える。
+        <strong>マスク生成モデル（masked generative modeling）</strong>：BERTのように一部のトークンを <span class="kbd">[MASK]</span> で隠して当てる学習。推論時は全マスクから少しずつ埋めていく。
+      </div>
+      <figure>
+        <img src="../../assets/img/intermask/fig1_teaser.png" alt="InterMaskによる二人相互作用生成の例">
+        <figcaption>Fig.1: InterMaskが生成する高忠実度のテキスト駆動の相互作用。ボクシング（連打と防御・反撃）、背後への接近、同期したダンスなど、<strong>空間的・時間的な噛み合い</strong>と適切な間合いを保つ。</figcaption>
+      </figure>
+
+      <h2 id="problem">背景と課題</h2>
+      <p>
+        二人の相互作用は、単独モーション生成より格段に難しい。各人の動きが<strong>自分の状態だけでなく相手の状態にも依存</strong>し、
+        さらに接触が絡む場面では<strong>正確な位置・向き・間合い</strong>が決定的に効くからだ。
+      </p>
+      <p>
+        従来手法は大きく2つの弱点を抱えていた。
+      </p>
+      <div class="compare">
+        <div class="col bad">
+          <h4>従来① 拡散モデル系（InterGen / in2IN など）</h4>
+          <ul>
+            <li>2つのモーション拡散モデルを<strong>協調トランスフォーマー</strong>などで橋渡しする。</li>
+            <li>結果のリアルさ・忠実度が伸び悩み、<strong>体の貫通や不自然な動き</strong>が残りやすい。</li>
+            <li>推論が遅く、パラメータも大きい（InterGenは182M、1.63秒）。</li>
+          </ul>
+        </div>
+        <div class="col bad">
+          <h4>従来② 1D VQトークン（T2M-GPT / MoMask など）</h4>
+          <ul>
+            <li>モーションを<strong>「時間方向だけ」の1Dトークン列</strong>に圧縮。</li>
+            <li>1トークンが<strong>その瞬間の全身を丸ごと</strong>抱え込むため、体の<strong>局所（手・足の位置関係）が潰れる</strong>。</li>
+            <li>相互作用のように「相対的な体の位置」が要る場面で表現力が足りない。</li>
+          </ul>
+        </div>
+      </div>
+      <p>
+        InterMaskは、この「<strong>表現（どう符号化するか）</strong>」と「<strong>生成（どう協調させるか）</strong>」の両方に手を入れて解決する。
+      </p>
+
+      <h2 id="overview">全体像</h2>
+      <p>
+        2段階の構成。まず各人のモーションを離散トークンに変換し（Stage 1）、次に二人ぶんのトークンをまとめてマスク予測する（Stage 2）。
+      </p>
+      <div class="flow">
+        <div class="box"><b>① Motion VQ-VAE</b>各人のモーションを<span class="sub">時間 n × 部位 j の2Dトークン地図</span> <span class="kbd">t<sub>a</sub>, t<sub>b</sub></span> に符号化。二人で<span class="sub">同じコードブックを共有</span>。</div>
+        <div class="arrow">→</div>
+        <div class="box"><b>② Inter-M Transformer</b>二人のトークンを連結し一部を<span class="sub">[MASK]</span>。テキスト条件のもと、Self/時空間/Cross-Attentionで<span class="sub">協調的に予測</span>。</div>
+        <div class="arrow">→</div>
+        <div class="box"><b>③ 反復デコード</b>全マスクから<span class="sub">確信度の高いトークンを残しつつ反復</span>して埋め、VQデコーダで二人のモーションへ復元。</div>
+      </div>
+      <figure>
+        <img src="../../assets/img/intermask/fig2_pipeline.png" alt="InterMaskの全体パイプライン (a)(b)">
+        <figcaption>Fig.2 (a)(b): (a) 各人のモーションを2D Encoder＋VQで2Dトークン地図 <span class="kbd">t<sub>a</sub>, t<sub>b</sub></span> に量子化（二人で共有のコードブック）。(b) 両者のトークンを平坦化・連結し、一部をマスクして CLIP のテキスト条件 <span class="kbd">c</span> のもと Inter-M Transformer が<strong>協調的に予測</strong>する。</figcaption>
+      </figure>
+
+      <h2 id="c1">貢献1: 2Dトークン地図でモーションを符号化する</h2>
+      <p>
+        ここがInterMaskの土台。モーションを <span class="kbd">m<sub>p</sub> ∈ ℝ<sup>N×J×d</sup></span>（N=フレーム数, J=関節数, d=関節特徴）と見て、
+        従来の1D畳み込みではなく<strong>2D畳み込み</strong>でダウンサンプルする。すると<strong>時間方向 n と空間（体の部位）方向 j の両方を持つ2Dの地図</strong>が得られる。
+      </p>
+      <div class="compare">
+        <div class="col bad">
+          <h4>従来: 1Dトークン列</h4>
+          <ul>
+            <li>時間方向だけ畳み込み → 各トークンが<strong>その短時間の全身</strong>を抱える。</li>
+            <li>体のどの部位かという<strong>空間情報が消える</strong>。</li>
+            <li>手と手の接触など、相対的な部位の位置が表せない。</li>
+          </ul>
+        </div>
+        <div class="col good">
+          <h4>InterMask: 2Dトークン地図</h4>
+          <ul>
+            <li>各トークンが<strong>「短い時間 × 特定の体の部位」</strong>の文脈を担う。</li>
+            <li><strong>空間的な気づき（spatial awareness）</strong>が残り、部位の位置関係を保てる。</li>
+            <li>相互作用に効く、きめ細かな時空間ディテールを保持。</li>
+          </ul>
+        </div>
+      </div>
+      <p>
+        さらに重要な設計判断として、符号化するのは<strong>相互作用全体ではなく「個人のモーション」</strong>。
+        個人のほうがモデル化が単純で、<strong>二人が同じトークン空間（コードブック）を共有</strong>できる。これは表現力を上げるうえ、
+        後述の<strong>リアクション生成</strong>のような片方だけ与える応用にも素直につながる。
+      </p>
+      <div class="note">
+        <span class="label">学習（VQ-VAE）</span>
+        再構成損失＋コミットメント損失（<span class="kbd">ℒ<sub>vq</sub></span>）に、EMA更新とコードブックリセットを併用。
+        さらにInterGen由来の幾何損失（関節速度 <span class="kbd">ℒ<sub>vel</sub></span>・接地 <span class="kbd">ℒ<sub>fc</sub></span>・骨長 <span class="kbd">ℒ<sub>bl</sub></span>）を足して物理的にもっともらしくする。
+      </div>
+      <div class="note key">
+        <span class="label">効果（VQ-VAEのアブレーション / Table 2）</span>
+        「<strong>個人モーション × 2D地図</strong>」が最良で、<strong>Recon FID 0.970 / MPJPE 0.129</strong>。
+        これを1Dに落とすと 3.146 / 0.354 と大きく悪化、2人まとめて符号化しても 1.276 / 0.198 にとどまる。
+        <strong>2D化と「個人単位」の両方</strong>が効いていることがわかる。
+      </div>
+
+      <h2 id="c2">貢献2: Inter-M Transformer（協調的マスク予測）</h2>
+      <p>
+        二人ぶんのトークン <span class="kbd">t<sub>a</sub>, t<sub>b</sub></span> を平坦化して <span class="kbd">[SEP]</span> トークンで区切り、1本の系列に連結する。
+        その一部を <span class="kbd">[MASK]</span> に置き換えて当てさせる。
+        相互作用には<strong>行動の順序が無い</strong>（どちらが先という決まりが無い）ため、データサンプリング・アーキテクチャ・埋め込みはすべて<strong>順序不変（permutation invariant）</strong>に設計されている。
+      </p>
+
+      <h3>2段階のマスク戦略</h3>
+      <ul>
+        <li><strong>① ランダムマスク（確率 p<sub>r</sub>）</strong>：二人とも、コサインスケジュール <span class="kbd">γ(τ)=cos(πτ/2)</span> に従う割合でマスク。学習を扱いやすくし推論と整合させる。</li>
+        <li><strong>② 相互作用マスク（確率 1−p<sub>r</sub>）</strong>：<strong>片方を完全に見せたまま</strong>、もう片方を予測させる。これにより「同じ人の隣のトークンに頼る」のを防ぎ、<strong>相手との依存関係を強制的に学ばせる</strong>。</li>
+        <li><strong>③ ステップアンロール・マスク</strong>：予測のうち<strong>確信度の低いトークンを再マスクして当て直す</strong>。推論（少しずつ確定していく過程）と揃えて精度を磨く。</li>
+      </ul>
+
+      <h3>トランスフォーマーブロックの設計（×L）</h3>
+      <p>各ブロックは3種のAttentionを順に通す。これが「人内」と「人間（じんかん）」の依存を同時に捉える肝だ。</p>
+      <ul>
+        <li><strong>Self Attention</strong>：系列全体に注意を向け、人をまたいだ長距離・大域の依存を捉える。</li>
+        <li><strong>Spatio-Temporal Attention（共有）</strong>：各人の中で、<strong>空間注意</strong>（同じ時刻の他部位）と<strong>時間注意</strong>（同じ部位の他時刻）を別々に計算し足し合わせる。<strong>個人内のきめ細かな依存</strong>を担当。</li>
+        <li><strong>Cross Attention（共有）</strong>：人 <span class="kbd">a</span> の各トークンが人 <span class="kbd">b</span> の全トークンに注意（逆も同様）。<strong>二人の間の依存</strong>を直接モデル化。</li>
+      </ul>
+      <figure>
+        <img src="../../assets/img/intermask/fig2_block.png" alt="Inter-M Transformerブロックの設計 (c)">
+        <figcaption>Fig.2 (c): 1ブロックの流れ。Input Process → <strong>Self Attn</strong>（人をまたぐ）→ Split → 各人ごとに <strong>Spatio-Temporal Attn</strong>（人内）→ <strong>Cross Attn</strong>（人間）→ FFN → Concat。テキスト条件 <span class="kbd">c</span> は <strong>AdaLN-mod</strong> で各正規化に注入される。</figcaption>
+      </figure>
+      <div class="note">
+        <span class="label">テキスト条件と出力</span>
+        凍結したCLIPでテキストを <span class="kbd">c</span> に符号化し、各層の正規化を <strong>AdaLN-mod</strong>（適応的層正規化）で動的に変調。
+        残差接続も <span class="kbd">c</span> から回帰したスケール <span class="kbd">α</span>（初期ゼロ）で恒等写像から始める。
+        最終層はコードブックのインデックスへ射影し、マスク位置の<strong>交差エントロピー <span class="kbd">ℒ<sub>mask</sub></span></strong> を最小化する。
+      </div>
+      <div class="note key">
+        <span class="label">効果（Inter-M Transformerのアブレーション / Table 3）</span>
+        フルモデル <strong>FID 5.154</strong>。最も効くのは<strong>Spatio-Temporal Attention</strong>で、外すと <strong>10.968</strong> に激悪化。
+        Cross Attentionを外すと 8.461、Self Attentionで 5.715、ステップアンロール＋相互作用マスクで 5.629。
+        さらに「片方ずつ順に生成する代替モデリング」だと 7.637 で、<strong>同時・協調が効いている</strong>。
+      </div>
+
+      <h2 id="inference">推論（生成の流れ）</h2>
+      <p>
+        二人とも<strong>全マスク</strong>の状態から開始する。各反復 <span class="kbd">i</span> で全マスク位置を予測し、<strong>確信度の高いものだけを残して</strong>低いものを再マスク。
+        コサインスケジュール <span class="kbd">γ(i/I)</span> に従って残すトークンを増やしながら <span class="kbd">I</span> 回繰り返し、最後にVQデコーダでモーションへ戻す。
+        Classifier-free guidance も併用してテキスト整合を高める。
+      </p>
+      <figure>
+        <img src="../../assets/img/intermask/fig4_qualitative.png" alt="InterGenとInterMaskの定性比較">
+        <figcaption>Fig.4: InterGen（左）と InterMask（右）の比較。「片方が右脚だけ激しく上げる」では InterGen が両脚を上げてしまうのに対し InterMask は右脚だけ。「二人がお辞儀」では InterGen が学習データのバイアスで余計な格闘動作を足すが、InterMask は素直にお辞儀のまま。<strong>テキスト忠実度と暗黙バイアス回避</strong>で勝る。</figcaption>
+      </figure>
+
+      <h2 id="results">実験と結果</h2>
+      <p>
+        ベンチマークは <strong>InterHuman</strong>（SMPL-H, 22関節, 7,779系列）と <strong>InterX</strong>（SMPL-X, 54関節, 11,388系列）。
+        指標は FID↓（リアルさ）、R-Precision↑（テキスト整合）、MM Dist↓、Diversity→、MModality↑。
+        <strong>体表現や関節数が違う両データセットでSOTA</strong>を取り、特定の体構造に依存しない頑健さを示した。
+      </p>
+      <div class="table-scroll">
+        <table class="data">
+          <thead>
+            <tr><th>データセット</th><th>手法</th><th>R@Top3↑</th><th>FID↓</th><th>MM Dist↓</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>InterHuman</td><td>Ground Truth</td><td>0.701</td><td>0.273</td><td>3.755</td></tr>
+            <tr><td>InterHuman</td><td>in2IN（従来SOTA）</td><td>0.662</td><td>5.535</td><td>3.803</td></tr>
+            <tr class="hl"><td>InterHuman</td><td>InterMask</td><td class="win">0.683</td><td class="win">5.154</td><td class="win">3.790</td></tr>
+            <tr><td>InterX</td><td>Ground Truth</td><td>0.736</td><td>0.002</td><td>3.536</td></tr>
+            <tr><td>InterX</td><td>InterGen</td><td>0.429</td><td>5.207</td><td>5.580</td></tr>
+            <tr class="hl"><td>InterX</td><td>InterMask</td><td class="win">0.705</td><td class="win">0.399</td><td class="win">3.705</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><strong>FIDでSOTA</strong>：InterHuman 5.535→<strong>5.154</strong>、InterX 5.207→<strong>0.399</strong>（桁違いの改善）。R-Precision・MM Distも最良。</li>
+        <li><strong>軽量・高速</strong>：推論パラメータ <strong>74M</strong>（InterGen 182M）、平均推論 <strong>0.77秒</strong>（InterGen 1.63秒）と半分以下。</li>
+        <li><strong>ユーザースタディ（16名）</strong>：相互作用品質 4.09 vs 3.30、テキスト整合 3.94 vs 3.20、総合 <strong>69.14%</strong> がInterMaskを選好。</li>
+        <li>MModality（同一テキストからの多様性）はやや低め。テキスト忠実度を優先した結果だが、Diversity自体は高くGTに近い。</li>
+      </ul>
+      <figure>
+        <img src="../../assets/img/intermask/fig5_userstudy.png" alt="InterGenとInterMaskのユーザースタディ">
+        <figcaption>Fig.5: ユーザースタディ。相互作用品質・テキスト整合のスコア（5点満点）と総合選好率（%）すべてで InterMask が上回る。</figcaption>
+      </figure>
+
+      <h2 id="reaction">応用: リアクション生成（微調整なし）</h2>
+      <p>
+        InterMaskの嬉しい副産物。<strong>片方の参照モーションを与えて、もう片方を生成する</strong>リアクション生成が、
+        タスク専用の微調整やアーキ変更なしでそのまま行える。個人単位のトークナイザとマスク予測のおかげで、
+        <strong>参照側のトークンをマスクせずに置き、相手側だけを反復生成</strong>すればよいからだ。
+      </p>
+      <div class="note key">
+        <span class="label">数値</span>
+        InterHumanでリアクション生成 <strong>FID 2.99 / R-Precision 0.462</strong>。
+        対する InterGen は微調整なしだと <strong>FID 52.89</strong> まで崩壊し、そのままでは対応できないことを示した。
+      </div>
+
+      <h2 id="takeaway">まとめ・所感</h2>
+      <div class="note key">
+        <span class="label">TAKEAWAY</span>
+        「<strong>2Dトークンで空間を残す表現</strong>」と「<strong>二人を同時に当てる協調的マスク予測</strong>」の二段構えが本質。
+        前者で相対的な体の位置関係を保ち、後者で人内・人間の依存をAttentionの三層構造で捉える。
+        この組み合わせが、リアルさ（FID）・テキスト忠実度・速度・軽さを同時に底上げした。
+      </div>
+      <ul>
+        <li><strong>強み</strong>：体表現の異なる2データセットでSOTA、軽量・高速、微調整なしでリアクション生成まで届く汎用性。</li>
+        <li><strong>弱み・限界</strong>：SMPLメッシュで見ると<strong>体の貫通や急動作時のガタつき</strong>が残る。プロンプト無しだと学習データの暗黙バイアスを拾うことがある。現状<strong>10秒以下の短い系列</strong>に最適化（長尺は弱い）。</li>
+        <li><strong>今後</strong>：滑らかな遷移、貫通の防止、データセットバイアス対策、長尺対応。</li>
+        <li><strong>HINTとの関係</strong>：HINTはInterMaskを「オフラインの一発生成」と位置づけ、自己回帰でオンライン・可変長・可変人数化した後続研究。InterMaskの2D表現＋協調マスクは「一発生成で高品質」を担う系譜。</li>
+        <li><strong>自分の理解メモ</strong>：<span class="todo">ここに自分の気づきを追記</span></li>
+      </ul>
+
+    </article>
+
+    <!-- ===== 逐語訳モード =====
+         原文(.src)と訳(.dst)をセクション単位で対にする。逐語訳は別作業で埋める。 -->
+    <article class="mode-pane content" data-mode="translate">
+
+      <p class="tr-intro">
+        各節を <em>原文（上・小さい斜体）</em> と <b>和訳（下）</b> の対で並べています。
+        和訳中の<span class="tnote">点線の語</span>には、画面<b>右の余白に訳註</b>が出ます（注を探しに行く必要はありません）。
+        ※画面が狭いときは訳註が段落の下に畳まれます。
+      </p>
+
+      <!-- ========== Abstract ========== -->
+      <h2 id="tr-abstract"><span class="tr-sec-num">—</span>Abstract（要旨）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Generating realistic 3D human-human interactions from textual descriptions remains a challenging task. Existing approaches, typically based on diffusion models, often produce results lacking realism and fidelity. In this work, we introduce <em>InterMask</em>, a novel framework for generating human interactions using collaborative masked modeling in discrete space. InterMask first employs a VQ-VAE to transform each motion sequence into a 2D discrete motion token map. Unlike traditional 1D VQ token maps, it better preserves fine-grained spatio-temporal details and promotes <em>spatial awareness</em> within each token.</p>
+          <p class="dst">テキスト記述から写実的な3次元の人間どうしの相互作用を生成することは、依然として難しい課題である。既存の手法は典型的には<span class="tnote">拡散モデル（diffusion models）</span>に基づいており、しばしば写実性と忠実度を欠いた結果を生む。本研究では <strong>InterMask</strong> を提案する。これは離散空間における<span class="tnote">協調的マスクモデリング（collaborative masked modeling）</span>を用いて人間の相互作用を生成する、新しいフレームワークである。InterMask はまず <span class="tnote">VQ-VAE</span> を用いて、各モーション系列を2次元の離散モーショントークン地図（2D discrete motion token map）へ変換する。従来の1次元の VQ トークン地図とは異なり、これによりきめ細かな時空間の詳細をよりよく保持し、各トークン内の<em>空間的気づき（spatial awareness）</em>を促進する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>拡散モデル <span class="en">diffusion models</span></b>：ノイズを少しずつ除去して目的のデータを作る生成方式。本論文ではこれを上回る品質を主張する比較対象。</aside>
+          <aside class="sn"><b>協調的マスクモデリング <span class="en">collaborative masked modeling</span></b>：トークン列の一部を隠し（マスクし）残りから予測する学習を、二人ぶんを同時に行うこと。本手法の核。</aside>
+          <aside class="sn"><b>VQ-VAE <span class="en">Vector-Quantized VAE</span></b>：連続的な特徴を、有限個の「コード」（コードブック）の最近傍に置き換えて離散トークン化するオートエンコーダ。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Building on this representation, InterMask utilizes a generative masked modeling framework to collaboratively model the tokens of two interacting individuals. This is achieved by employing a transformer architecture specifically designed to capture complex spatio-temporal inter-dependencies. During training, it randomly masks the motion tokens of both individuals and learns to predict them. For inference, starting from fully masked sequences, it progressively fills in the tokens for both individuals.</p>
+          <p class="dst">この表現の上に、InterMask は生成的マスクモデリングの枠組みを用いて、相互作用する二人ぶんのトークンを協調的にモデル化する。これは、複雑な時空間的な相互依存（spatio-temporal inter-dependencies）を捉えるために特別に設計された<span class="tnote">Transformer</span>アーキテクチャを用いることで実現される。学習時には、両者のモーショントークンをランダムにマスクし、それらを予測することを学ぶ。推論時には、完全にマスクされた系列から出発し、両者のトークンを段階的に埋めていく。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>Transformer</b>：注意機構（attention）を中心に、系列内の要素間の関係を学習するネットワーク。本論文では二人ぶんのトークンを処理する Inter-M Transformer を提案する。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">With its enhanced motion representation, dedicated architecture, and effective learning strategy, InterMask achieves state-of-the-art results, producing high-fidelity and diverse human interactions. It outperforms previous methods, achieving an FID of 5.154 (vs 5.535 of in2IN) on the InterHuman dataset and 0.399 (vs 5.207 of InterGen) on the InterX dataset. Additionally, InterMask seamlessly supports reaction generation without the need for model redesign or fine-tuning.</p>
+          <p class="dst">強化されたモーション表現・専用アーキテクチャ・効果的な学習戦略により、InterMask は最先端（state-of-the-art）の結果を達成し、高忠実度で多様な人間の相互作用を生成する。先行手法を上回り、<span class="tnote">InterHuman</span> データセットで <span class="tnote">FID</span> 5.154（in2IN の 5.535 に対して）、<span class="tnote">InterX</span> データセットで 0.399（InterGen の 5.207 に対して）を達成する。さらに InterMask は、モデルの再設計や微調整（fine-tuning）を必要とせず、<span class="tnote">反応生成（reaction generation）</span>をシームレスに支援する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>InterHuman / InterX</b>：二人相互作用の評価に使う2つのデータセット。InterHuman は AMASS 系（22関節）、InterX は SMPL-X 系（54関節）の骨格表現。</aside>
+          <aside class="sn"><b>FID <span class="en">Fréchet Inception Distance</span></b>：生成結果と本物（GT）の特徴分布の近さを測る指標。<b>小さいほど良い</b>＝よりリアル。</aside>
+          <aside class="sn"><b>反応生成 <span class="en">reaction generation</span></b>：相手（参照）の動きが与えられ、それに対するもう一方の応答動作を生成する片方向タスク。両者を同時に作る「相互作用生成」と区別される。</aside>
+        </div>
+      </div>
+
+      <!-- ========== 1 Introduction ========== -->
+      <h2 id="tr-1"><span class="tr-sec-num">1</span>Introduction（はじめに）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">3D human interaction generation is a fundamental task in computer vision and graphics, with applications in animation, virtual reality, robotics, and sports. Although significant progress has been made in generating single-person motion sequences from text descriptions (Tevet et al., 2023; Guo et al., 2024; 2022a; Pinyoanuntapong et al., 2024; Zhang et al., 2023; Petrovich et al., 2022), generating two-person interactions remains a significant challenge. In two-person interactions, each individual's motion depends not only on their own state but also on the state of their interacting partner. Additionally, precise spatial positioning and orientation becomes crucial, specially in close-contact cases. These factors add to the complexity and nuances of human interactions resulting in a higher degree of spatial and temporal interdependence compared to single-person motion.</p>
+          <p class="dst">3次元の人間の相互作用生成は、コンピュータビジョンとグラフィックスにおける基礎的な課題であり、アニメーション、バーチャルリアリティ、ロボティクス、スポーツに応用される。テキスト記述から単一人物のモーション系列を生成する点では大きな進展があったものの、二人ぶんの相互作用の生成は依然として大きな課題である。二人の相互作用では、各人の動きは自分自身の状態だけでなく、相互作用する相手の状態にも依存する。さらに、特に密接な接触のある場面では、正確な空間的位置と向きが決定的に重要になる。これらの要因が人間の相互作用の複雑さと機微を増し、単一人物のモーションに比べて空間的・時間的な相互依存の度合いが高くなる。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/fig1_teaser.png" alt="Figure 1: InterMaskによる二人相互作用生成の例">
+        <figcaption><b>Figure 1.</b> InterMask が生成する高忠実度のテキスト駆動の3次元相互作用。ボクシング中の写実的な反応タイミング、同期したダンスの動き、適切な間合いなど、正確な空間的・時間的な噛み合いと高品質な姿勢を保つ。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Existing works on human interaction generation commonly rely on diffusion models. ComMDM (Shafir et al., 2024) bridges two pretrained single-person motion diffusion models using a small neural network with limited interaction data. In contrast, InterGen (Liang et al., 2024) proposes a specifically tailored diffusion model for two-person interactions, which uses cooperative transformers to model each individual's motion conditioned on the latent features of their partner's motion. in2IN (Ruiz-Ponce et al., 2024) then extends it by conditioning the diffusion model on LLM-generated individual descriptions in addition to the overall interaction descriptions, and leveraging motion priors learned from single-person motion datasets like HumanML3D (Guo et al., 2022a).</p>
+          <p class="dst">人間の相互作用生成に関する既存研究は、一般に拡散モデルに依拠している。<span class="tnote">ComMDM</span>（Shafir et al., 2024）は、限られた相互作用データを用いた小さなニューラルネットワークによって、事前学習済みの単一人物モーション拡散モデルを2つ橋渡しする。これに対し <span class="tnote">InterGen</span>（Liang et al., 2024）は、二人相互作用のために専用に仕立てた拡散モデルを提案する。これは協調的Transformer（cooperative transformers）を用い、相手のモーションの潜在特徴を条件として各人の動きをモデル化する。in2IN（Ruiz-Ponce et al., 2024）はさらにこれを拡張し、相互作用全体の記述に加えて LLM が生成した個人記述を拡散モデルの条件に加え、HumanML3D（Guo et al., 2022a）のような単一人物モーションデータセットから学んだモーション事前分布（motion priors）を活用する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>ComMDM / InterGen</b>：いずれも拡散ベースの先行手法。InterGen は本論文の主要な比較対象で、定性比較・ユーザースタディで対比される。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">MoMat-MoGen (Cai et al. (2024)) retrieves motions from supplementary datasets, based on textual inputs, and refines them for interaction quality. Some very recent efforts (Shan et al., 2024; Fan et al., 2024) extend these methods to more than two individuals. Despite these efforts, the generated two-person interactions still fall short of achieving satisfactory realism and fidelity.</p>
+          <p class="dst">MoMat-MoGen（Cai et al. (2024)）は、テキスト入力に基づき補助データセットからモーションを検索し、相互作用の品質のためにそれらを洗練する。ごく最近の取り組み（Shan et al., 2024; Fan et al., 2024）は、これらの手法を二人以上へ拡張している。こうした努力にもかかわらず、生成される二人相互作用は依然として満足のいく写実性と忠実度の達成には至っていない。</p>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">In this work, we present <em>InterMask</em>, a novel framework based on generative masked modeling in discrete space (Chang et al., 2022). InterMask consists of two stages. First, a shared VQ-VAE is trained to transform each individual's motion into a 2D discrete token map using a learned codebook C (section 3.1). Unlike previous motion VQ-VAEs (Guo et al., 2022b; Zhang et al., 2023; Guo et al., 2024; Pinyoanuntapong et al., 2024), which represent motion as a temporal sequence of 1D pose vectors and use 1D convolutions to capture only temporal context in each token, we preserve both temporal and spatial dimensions. Each motion is represented as ℝ<sup>N×J×d</sup>, where N is the number of poses, J is the number of joints, and d is the joint feature dimension. Using 2D convolutions, we generate a 2D token map, which captures body part context over short time ranges in each token, allowing for better spatial awareness. This is crucial for interactions, where relative body part positioning (e.g., hands) of two individuals holds significant importance.</p>
+          <p class="dst">本研究では <strong>InterMask</strong> を提案する。これは離散空間における生成的マスクモデリング（Chang et al., 2022）に基づく新しいフレームワークである。InterMask は2つの段階からなる。第一に、学習したコードブック C を用いて各人のモーションを2次元離散トークン地図へ変換するために、<span class="tnote">共有 VQ-VAE</span> を学習する（3.1節）。モーションを1次元ポーズベクトルの時間系列として表現し、1次元畳み込みで各トークンに時間的文脈のみを捉える従来のモーション VQ-VAE とは異なり、本手法は時間方向と空間方向の両方の次元を保持する。各モーションは ℝ<sup>N×J×d</sup> として表現される。ここで N はポーズ数、J は関節数、d は関節特徴の次元である。<span class="tnote">2次元畳み込み</span>を用いて2次元トークン地図を生成する。これは各トークンに短い時間範囲にわたる体の部位の文脈を捉え、より良い空間的気づきを可能にする。これは相互作用において決定的に重要であり、二人の体の部位（例えば手）の相対的な位置が大きな意味を持つ。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>共有 VQ-VAE <span class="en">shared</span></b>：相互作用全体ではなく「個人のモーション」を符号化し、二人で同一のコードブック（離散トークン空間）を共有する。表現が単純化され表現力が上がる。</aside>
+          <aside class="sn"><b>2次元畳み込み</b>：時間方向 N だけでなく空間（関節）方向 J も畳み込み、「時間 × 部位」の2D地図を作る。従来は時間1次元のみ。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">In the second stage, a specialized Inter-M Transformer (section 3.2) is trained to collaboratively model the tokens of both individuals using a generative masked modeling framework. During training, a random proportion of tokens from either both individuals or only one individual is masked and predicted. The masking proportion follows a scheduling function to ensure its tractability during inference. The inference process begins with all tokens masked, which are progressively generated over a pre-defined number of iterations. At each iteration, the model predicts all masked tokens, but only the most confident predictions are retained, while the rest are re-masked and re-predicted in subsequent iterations. In addition to the standard self attention module, Inter-M Transformer features a shared spatio-temporal attention module to capture fine-grained dependencies within each individual's motion, and a cross-attention module to capture dependencies between the two individuals' motion. This design effectively models the dynamics of spatial and temporal relationships among and between the two individuals, allowing enhanced interaction generation capabilities.</p>
+          <p class="dst">第二の段階では、生成的マスクモデリングの枠組みを用いて両者のトークンを協調的にモデル化するために、専用の Inter-M Transformer（3.2節）を学習する。学習時には、両者または片方のみのトークンのランダムな割合をマスクして予測する。マスクの割合は、推論時の扱いやすさを保証するためにスケジューリング関数に従う。推論過程はすべてのトークンがマスクされた状態から始まり、あらかじめ定めた反復回数にわたって段階的に生成される。各反復で、モデルはすべてのマスクされたトークンを予測するが、最も確信度の高い予測だけを保持し、残りは再びマスクされて以降の反復で再予測される。標準的な自己注意（self attention）モジュールに加え、Inter-M Transformer は各人のモーション内のきめ細かい依存関係を捉える共有の時空間注意（spatio-temporal attention）モジュールと、二人のモーション間の依存関係を捉える交差注意（cross-attention）モジュールを備える。この設計は二人の間および二人の中での空間的・時間的関係のダイナミクスを効果的にモデル化し、相互作用生成能力を高める。</p>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">The main contributions of this work are as follows. First, we introduce InterMask, a novel masked generative framework for human-human interaction generation from textual descriptions. InterMask utilizes a 2D VQ encoding that transforms motion sequences into discrete 2D token maps and features a dedicated transformer trained with a generative masked modeling framework which effectively captures both intra- and inter-person spatial and temporal dependencies. Second, InterMask achieves state-of-the-art results in generating high-fidelity, text-conditioned interactions. Empirically, it achieves an FID of 5.15 (vs. 5.54 of Ruiz-Ponce et al. (2024)) on InterHuman and 0.399 (vs. 5.207 of Liang et al. (2024)) on InterX. Third, InterMask seamlessly supports tasks such as reaction generation without requiring any task-specific fine-tuning or architectural changes.</p>
+          <p class="dst">本研究の主な貢献は以下のとおりである。第一に、テキスト記述からの人間どうしの相互作用生成のための新しいマスク生成フレームワーク InterMask を導入する。InterMask はモーション系列を離散的な2Dトークン地図へ変換する2D VQ 符号化を用い、人内（intra-person）と人間（inter-person）の双方の空間的・時間的依存関係を効果的に捉える、生成的マスクモデリングの枠組みで学習された専用Transformerを特徴とする。第二に、InterMask は高忠実度でテキスト条件付きの相互作用生成において最先端の結果を達成する。実験的に、InterHuman で FID 5.15（Ruiz-Ponce et al. (2024) の 5.54 に対して）、InterX で 0.399（Liang et al. (2024) の 5.207 に対して）を達成する。第三に、InterMask はタスク固有の微調整やアーキテクチャの変更を一切必要とせず、反応生成のようなタスクをシームレスに支援する。</p>
+        </div>
+      </div>
+
+      <!-- ========== 2 Related Work ========== -->
+      <h2 id="tr-2"><span class="tr-sec-num">2</span>Related Work（関連研究）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Quantized Motion Representation</b> Quantized latent representations transform continuous data into discrete tokens, which has been widely explored in human motion generation. Deep Motion Signatures (Aristidou et al., 2018) adopted the use of contrastive learning to create discrete motif words, while TM2T (Guo et al., 2022b) was one of the first to apply VQ-VAE (Van Den Oord et al., 2017) to human motion data, producing discrete motion tokens. T2M-GPT (Zhang et al., 2023) used Exponential Moving Average (EMA) and code reset to improve the VQ-VAE, later adopted in PoseGPT (Lucas et al., 2022) and MotionGPT (Jiang et al., 2023; Zhang et al., 2024b). MoMask (Guo et al., 2024) reduced quantization errors via residual quantization, while MMM (Pinyoanuntapong et al., 2024) utilized a large codebook with the factorized codes technique from Yu et al. (2022). Nevertheless, these works often ignore the spatial dimension of motions, where each token encapsulates the whole information of poses in a short range. This limits the locality of each token, which is important in applications like interactions and motion editing.</p>
+          <p class="dst"><b>量子化されたモーション表現</b> 量子化された潜在表現は連続データを離散トークンへ変換するもので、人間のモーション生成において広く探究されてきた。Deep Motion Signatures（Aristidou et al., 2018）は離散的なモチーフ語を作るために<span class="tnote">対照学習（contrastive learning）</span>を用い、TM2T（Guo et al., 2022b）は VQ-VAE（Van Den Oord et al., 2017）を人間のモーションデータに適用して離散モーショントークンを生成した最初期の一つであった。T2M-GPT（Zhang et al., 2023）は VQ-VAE を改善するために<span class="tnote">指数移動平均（EMA）とコードリセット</span>を用い、これは後に PoseGPT（Lucas et al., 2022）や MotionGPT（Jiang et al., 2023; Zhang et al., 2024b）でも採用された。MoMask（Guo et al., 2024）は<span class="tnote">残差量子化（residual quantization）</span>によって量子化誤差を低減し、MMM（Pinyoanuntapong et al., 2024）は Yu et al. (2022) の分解コード技法を用いた大きなコードブックを利用した。しかしながら、これらの研究はしばしばモーションの空間次元を無視し、各トークンが短い範囲のポーズの情報全体を包み込んでしまう。これは各トークンの局所性を制限してしまい、相互作用やモーション編集のような応用では重要な点である。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>対照学習 <span class="en">contrastive learning</span></b>：似たものを近く・異なるものを遠くに配置するよう表現を学ぶ手法。</aside>
+          <aside class="sn"><b>EMA／コードリセット</b>：VQ コードブックの更新を安定させる技法。使われないコードを再初期化（リセット）して死蔵を防ぐ。</aside>
+          <aside class="sn"><b>残差量子化 <span class="en">residual quantization</span></b>：量子化の残差をさらに別のコードで近似…を多段で繰り返し、誤差を減らす方式。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Generative Human Motion Modeling</b> Synthesizing single-person motion has gained interest, driven by the availability of large motion capture datasets and advancements in generative modeling techniques like Diffusions (Tevet et al., 2023; Kim et al., 2023a; Zhang et al., 2024a; Tseng et al., 2023; Chen et al., 2023; Kong et al., 2023; Lou et al., 2023) and Autoregressive models (Guo et al., 2022b; Zhang et al., 2023; Jiang et al., 2023; Zhang et al., 2024b; Gong et al., 2023; Lucas et al., 2022; Gong et al., 2023). While these models produce high-quality motions, they require numerous sampling steps during inference. Techniques like the DDIM sampler (Song et al., 2021) aim to address this for diffusion models but are still evolving. Additionally, autoregressive models may have limited expressivity since the model only considers past tokens to generate the next one. MoMask (Guo et al., 2024) and MMM (Pinyoanuntapong et al., 2024) attempted to address both these issues by using a masked generative bidirectional transformer to predict all masked tokens simultaneously. These works inspired the base structure of our InterMask.</p>
+          <p class="dst"><b>生成的な人間モーションのモデリング</b> 単一人物モーションの合成は、大規模なモーションキャプチャデータセットの利用可能性と、拡散モデル（Diffusions）や<span class="tnote">自己回帰モデル（Autoregressive models）</span>のような生成モデリング技法の進展に後押しされて関心を集めてきた。これらのモデルは高品質なモーションを生成するが、推論時に多数のサンプリングステップを要する。DDIM サンプラー（Song et al., 2021）のような技法は拡散モデルでこれに対処しようとしているが、なお発展途上である。さらに、自己回帰モデルは次のトークンを生成するのに過去のトークンしか考慮しないため、表現力が限られる可能性がある。MoMask（Guo et al., 2024）と MMM（Pinyoanuntapong et al., 2024）は、<span class="tnote">マスク生成的双方向Transformer</span>を用いてすべてのマスクされたトークンを同時に予測することで、これら2つの問題に対処しようとした。これらの研究は、本手法 InterMask の基本構造に着想を与えた。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>自己回帰モデル <span class="en">autoregressive</span></b>：直前までの出力を入力に戻して次を1つずつ予測する方式。過去しか見ないため表現力に限界が出やすい。</aside>
+          <aside class="sn"><b>マスク生成的双方向Transformer</b>：列の前後（双方向）の文脈を使って、マスクされた全トークンを一斉に予測する。InterMask の土台。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Generative Human-Human Interaction Modeling</b> Most research on human interaction modeling has targeted two-person interactions, primarily addressing two major tasks: 1) reaction generation, where the reactor's motion is generated based on the actor's motion, and 2) interaction generation, where both individuals' motions are generated simultaneously. While reaction generation has seen increasing interest (Chopin et al., 2023; Liu et al., 2023; Xu et al., 2024b; Ghosh et al., 2024; Ren et al., 2024; Liu et al., 2024), interaction generation is less explored. ComMDM (Shafir et al., 2024) trained a small neural network to bridge two single-person motion diffusion model (MDM (Tevet et al., 2023)) copies on a limited interaction dataset. On the other hand, RIG (Tanaka & Fujiwara, 2023) and InterGen (Liang et al., 2024) introduced interaction diffusion models that simultaneously denoise both individuals' motions, conditioned on their partner's latent representation.</p>
+          <p class="dst"><b>生成的な人間どうしの相互作用のモデリング</b> 人間の相互作用モデリングに関するほとんどの研究は二人相互作用を対象とし、主に2つの大きなタスクに取り組んできた。すなわち、1) <span class="tnote">反応生成</span>（reactor の動きを actor の動きに基づいて生成する）、および 2) <span class="tnote">相互作用生成</span>（両者の動きを同時に生成する）である。反応生成への関心は高まりつつある一方、相互作用生成はあまり探究されていない。ComMDM（Shafir et al., 2024）は、限られた相互作用データセット上で、単一人物モーション拡散モデル（MDM（Tevet et al., 2023））のコピーを2つ橋渡しする小さなニューラルネットワークを学習した。一方、RIG（Tanaka &amp; Fujiwara, 2023）と InterGen（Liang et al., 2024）は、相手の潜在表現を条件として両者のモーションを同時にノイズ除去する相互作用拡散モデルを導入した。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>反応生成 vs 相互作用生成</b>：前者は actor（演者）の動きが与えられ reactor（応答者）を生成する片方向。後者は二人ぶんを同時に生成する。InterMask は後者が主で、反応生成も無調整でこなせる。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">Subsequent works, like Cai et al. (2024) and Ruiz-Ponce et al. (2024) extended interaction diffusion models by using additional single-person annotations and supplementary motion datasets, whereas Shan et al. (2024) and Fan et al. (2024) extended them to handle more than two individuals. While these methods achieve impressive results, there remains significant room for improvement in the quality and realism of two-person interactions. In this paper, we address this by explicitly modeling the spatio-temporal dependencies between interacting individuals' using a masked generative framework.</p>
+          <p class="dst">後続の研究、例えば Cai et al. (2024) や Ruiz-Ponce et al. (2024) は、追加の単一人物アノテーションや補助的なモーションデータセットを用いて相互作用拡散モデルを拡張し、Shan et al. (2024) や Fan et al. (2024) は二人以上を扱えるようそれらを拡張した。これらの手法は目覚ましい結果を達成しているが、二人相互作用の品質と写実性には依然として大きな改善の余地が残されている。本論文では、マスク生成的な枠組みを用いて、相互作用する個人どうしの間の時空間依存関係を明示的にモデル化することでこれに取り組む。</p>
+        </div>
+      </div>
+
+      <!-- ========== 3 Methodology ========== -->
+      <h2 id="tr-3"><span class="tr-sec-num">3</span>Methodology（手法）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Our objective is to generate two-person interaction {m<sub>p</sub>}<sub>p∈{a,b}</sub> given a textual description, where m<sub>p</sub> ∈ ℝ<sup>N×J×d</sup> represents the motion sequences of one individual (either a or b), consisting of N poses, each with J joints and d-dimensional joint features. As shown in Figure 2, our methodology consists of two stages. First, we learn a discrete representation of individual motions using a VQ-VAE (section 3.1), which maps motion sequences to a 2-dimensional token map {t<sub>p</sub>}<sub>p∈{a,b}</sub> ∈ {0,1,⋯,|C|−1}<sup>n×j</sup>, where n and j are down-sampled temporal and spatial dimensions, and |C| is the number of codes in the codebook. Then we learn an interaction masked generative transformer (Inter-M Transformer), (section 3.2) to collaboratively model the discrete tokens of both individuals.</p>
+          <p class="dst">我々の目的は、テキスト記述が与えられたときに二人相互作用 {m<sub>p</sub>}<sub>p∈{a,b}</sub> を生成することである。ここで m<sub>p</sub> ∈ ℝ<sup>N×J×d</sup> は一方の人物（a または b）のモーション系列を表し、N 個のポーズからなり、各ポーズは J 個の関節と d 次元の関節特徴を持つ。Figure 2 に示すように、本手法は2つの段階からなる。第一に、VQ-VAE（3.1節）を用いて個人モーションの離散表現を学習する。これはモーション系列を2次元のトークン地図 {t<sub>p</sub>}<sub>p∈{a,b}</sub> ∈ {0,1,⋯,|C|−1}<sup>n×j</sup> へ写像する。ここで n と j はダウンサンプルされた時間・空間の次元、|C| はコードブック中のコード数である。次に、両者の離散トークンを協調的にモデル化するために、相互作用マスク生成Transformer（Inter-M Transformer、3.2節）を学習する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>記号の読み方</b>：m<sub>p</sub> は人物 p のモーション。下付き p∈{a,b} は二人を指す。N×J×d は「ポーズ数 × 関節数 × 関節特徴次元」。n×j は符号化後（縮小後）の「時間 × 部位」の2D地図。|C| はコードブックの語彙数。</aside>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/fig2_pipeline.png" alt="Figure 2 (a)(b): InterMaskの全体パイプライン">
+        <figcaption><b>Figure 2 (a)(b).</b> InterMask の概観。(a) 各人のモーションをベクトル量子化（VQ）し、それぞれ2Dトークン {t<sub>a</sub>, t<sub>b</sub>} を得る。(b) 両者のモーショントークンを平坦化・連結し、一部をマスクして Inter-M Transformer が協調的に予測する。（(c) は3.2.2節に掲載）</figcaption>
+      </figure>
+
+      <h3 id="tr-3-1">3.1 2D Discrete Motion Token Map（2次元離散モーショントークン地図）</h3>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">We start by learning a discrete latent representation space for individual motions using a VQ-VAE. We tokenize individual motions instead of the entire interaction because the complexity of modeling interactions is significantly higher. This allows both individuals to share the same discrete token space, simplifying the representation and improving expressivity, as empirically shown in Table 2. Additionally, this provides greater flexibility for complementary tasks such as reaction generation.</p>
+          <p class="dst">まず、VQ-VAE を用いて個人モーションのための離散潜在表現空間を学習することから始める。相互作用全体ではなく個人モーションをトークン化するのは、相互作用のモデル化の複雑さが格段に高いからである。これにより両者が同一の離散トークン空間を共有でき、表現が単純化されるとともに、Table 2 で実証的に示すように表現力が向上する。さらに、これは反応生成のような補完的なタスクに対してより大きな柔軟性をもたらす。</p>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">We create a 2D token map with both spatial and temporal dimensions by representing motion as m<sub>p</sub> ∈ ℝ<sup>N×J×d</sup> and using 2D convolutions. As illustrated in Figure 2(a), our VQ-VAE downsamples the input sequence m<sub>p</sub> ∈ ℝ<sup>N×J×d</sup> into a latent representation t̃<sub>p</sub> ∈ ℝ<sup>n×j×d'</sup>, with downsampling ratios n/N and j/J. Each d'-dimensional vector is then quantized by replacing it with the nearest entry from a learnable codebook C = {c<sub>k</sub>}<sub>k=0</sub><sup>|C|−1</sup> ⊂ ℝ<sup>d'</sup>, producing a quantized sequence t<sub>p</sub> = Q(t̃<sub>p</sub>) ∈ ℝ<sup>n×j×d'</sup>. This is then decoded to reconstruct the motion m̂<sub>p</sub> = D(t<sub>p</sub>). After training, each vector in t<sub>p</sub> can be replaced by its respective index k in C to obtain the 2d discrete representation of motion, namely <em>motion tokens</em> {t<sub>p</sub>}<sub>p∈{a,b}</sub> ∈ {0,1,⋯,|C|−1}<sup>n×j</sup>, which is modeled in our Inter-M Transformer. More details are provided in appendix B.</p>
+          <p class="dst">モーションを m<sub>p</sub> ∈ ℝ<sup>N×J×d</sup> として表現し2次元畳み込みを用いることで、空間次元と時間次元の両方を持つ2Dトークン地図を作る。Figure 2(a) に示すように、本 VQ-VAE は入力系列 m<sub>p</sub> ∈ ℝ<sup>N×J×d</sup> を潜在表現 t̃<sub>p</sub> ∈ ℝ<sup>n×j×d'</sup> へダウンサンプルする（ダウンサンプル比は n/N と j/J）。続いて各 d' 次元ベクトルは、学習可能なコードブック C = {c<sub>k</sub>}<sub>k=0</sub><sup>|C|−1</sup> ⊂ ℝ<sup>d'</sup> の中の最近傍エントリに置き換えることで<span class="tnote">量子化</span>され、量子化系列 t<sub>p</sub> = Q(t̃<sub>p</sub>) ∈ ℝ<sup>n×j×d'</sup> を生む。これがデコードされてモーション m̂<sub>p</sub> = D(t<sub>p</sub>) を再構成する。学習後、t<sub>p</sub> 中の各ベクトルは C における対応するインデックス k に置き換えられ、モーションの2次元離散表現、すなわち<em>モーショントークン</em> {t<sub>p</sub>}<sub>p∈{a,b}</sub> ∈ {0,1,⋯,|C|−1}<sup>n×j</sup> が得られる。これが Inter-M Transformer でモデル化される。詳細は付録 B に示す。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>記号</b>：チルダ t̃ は量子化前の連続な潜在表現、ハット m̂ は再構成（予測）したモーション。Q(·) は量子化、D(·) はデコーダ。d' は潜在ベクトルの次元。</aside>
+          <aside class="sn"><b>量子化 <span class="en">quantization</span></b>：連続ベクトルを、コードブック中の最も近いコード c<sub>k</sub> に丸める操作。これにより各位置が整数インデックス k で表せる＝離散トークン化。</aside>
+        </div>
+      </div>
+
+      <h3 id="tr-3-1-1">3.1.1 Training Objective（学習目的関数）</h3>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Our primary VQ-VAE training objective consists of a motion reconstruction loss and the commitment loss (Van Den Oord et al., 2017):</p>
+          <p class="dst">本 VQ-VAE の主要な学習目的関数は、モーション再構成損失と<span class="tnote">コミットメント損失（commitment loss）</span>（Van Den Oord et al., 2017）からなる。</p>
+          <div class="eq">𝓛<sub>vq</sub> = ‖m<sub>p</sub> − m̂<sub>p</sub>‖<sub>1</sub> + β‖t̃<sub>p</sub> − sg(t<sub>p</sub>)‖<sub>2</sub><sup>2</sup>, <span class="num">(1)</span></div>
+          <p class="dst">ここで sg(·) はストップ勾配（stop-gradient）操作を表し、β は重み係数である。我々は Zhang et al. (2023) に倣い、コードブック C の更新に指数移動平均（EMA）とコードブックリセットを用いる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>コミットメント損失 <span class="en">commitment loss</span></b>：エンコーダ出力 t̃ を、選ばれたコード（量子化結果 t）から離れすぎないよう引き寄せる項。VQ-VAE 学習を安定させる。</aside>
+          <aside class="sn"><b>sg(·)・stop-gradient</b>：その項を通る勾配を止める操作。量子化の非微分性を回避するための工夫。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">We also incorporate geometric losses from Liang et al. (2024) to impose additional constraints, including the joint velocity loss 𝓛<sub>vel</sub>, the foot contact loss 𝓛<sub>fc</sub>, and the bone length loss 𝓛<sub>bl</sub>, which are explained in appendix C. The overall loss function 𝓛<sub>vqvae</sub> is a weighted sum of these losses:</p>
+          <p class="dst">さらに Liang et al. (2024) の幾何学的損失を取り入れて追加の制約を課す。これには関節速度損失 𝓛<sub>vel</sub>、足の接地損失 𝓛<sub>fc</sub>、骨長損失 𝓛<sub>bl</sub> が含まれ、付録 C で説明される。全体の損失関数 𝓛<sub>vqvae</sub> はこれらの損失の重み付き和である。</p>
+          <div class="eq">𝓛<sub>vqvae</sub> = 𝓛<sub>vq</sub> + λ<sub>vel</sub>𝓛<sub>vel</sub> + λ<sub>fc</sub>𝓛<sub>fc</sub> + λ<sub>bl</sub>𝓛<sub>bl</sub> <span class="num">(2)</span></div>
+        </div>
+      </div>
+
+      <h3 id="tr-3-2">3.2 Interaction Masked Generative Transformer（相互作用マスク生成Transformer）</h3>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Next, the motion tokens for both individuals {t<sub>a</sub>, t<sub>b</sub>} are collaboratively modeled by our Inter-M Transformer, capturing complex spatial and temporal dependencies within and between them. Importantly, there is no order to the actions of interacting individuals in this task. Therefore we make sure our data sampling, transformer architecture and embedding design are all permutation invariant.</p>
+          <p class="dst">次に、両者のモーショントークン {t<sub>a</sub>, t<sub>b</sub>} を Inter-M Transformer によって協調的にモデル化し、二人の中および間の複雑な空間的・時間的依存関係を捉える。重要なことに、このタスクでは相互作用する個人の行為に順序はない。したがって我々は、データサンプリング・Transformerアーキテクチャ・埋め込み設計のすべてが<span class="tnote">置換不変（permutation invariant）</span>であることを保証する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>置換不変 <span class="en">permutation invariant</span></b>：人物 a と b を入れ替えても結果が変わらない性質。二人に主従の順序がないため、設計全体でこれを担保する。</aside>
+        </div>
+      </div>
+
+      <h3 id="tr-3-2-1">3.2.1 Token Masking and Embedding（トークンのマスクと埋め込み）</h3>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">As shown in Figure 2(b), we first flatten and concatenate t<sub>a</sub> and t<sub>b</sub>, separated by a special [SEP] token, to form a consolidated sequence t ∈ ℤ<sup>2nj+1</sup>. A subset of these tokens is then masked by replacing it with a learnable special-purpose token [MASK] following a two-stage scheme. In the first stage, we apply <em>random masking</em> with probability p<sub>r</sub> or <em>interaction masking</em> with 1 − p<sub>r</sub>. In random masking, both t<sub>a</sub> and t<sub>b</sub> are randomly masked with ratio γ(τ<sub>i</sub>), controlled by a cosine scheduling function (Chang et al., 2022), as shown in eq. (3). In interaction masking, one of {t<sub>a</sub>, t<sub>b</sub>} is kept fully unmasked, encouraging the model not to rely on the tokens from the same individual and learn inter-individual dependencies.</p>
+          <p class="dst">Figure 2(b) に示すように、まず t<sub>a</sub> と t<sub>b</sub> を平坦化して連結し、特別な <span class="tnote">[SEP] トークン</span>で区切って、統合された系列 t ∈ ℤ<sup>2nj+1</sup> を作る。続いて、これらのトークンの一部を、学習可能な特別目的のトークン [MASK] に置き換えることで、2段階の方式に従ってマスクする。第1段階では、確率 p<sub>r</sub> で<em>ランダムマスク（random masking）</em>を、1 − p<sub>r</sub> で<em>相互作用マスク（interaction masking）</em>を適用する。ランダムマスクでは、t<sub>a</sub> と t<sub>b</sub> の両方を比率 γ(τ<sub>i</sub>) でランダムにマスクする。これは式 (3) に示すように<span class="tnote">コサインスケジューリング関数</span>（Chang et al., 2022）で制御される。相互作用マスクでは、{t<sub>a</sub>, t<sub>b</sub>} の一方を完全にマスクせずに残す。これによりモデルが同一個人のトークンに依存しないよう促し、個人間の依存関係を学ばせる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>[SEP] / [MASK] トークン</b>：[SEP] は二人ぶんの列の区切り。[MASK] は「ここを予測せよ」という穴を表す学習可能な特別トークン。系列長は 2nj+1（二人ぶん＋区切り1）。</aside>
+          <aside class="sn"><b>相互作用マスク <span class="en">interaction masking</span></b>：片方を丸ごと見せ、もう片方を当てさせる。自分の手掛かりに頼らず「相手から読む」力を育てる狙い。反応生成にも直結。</aside>
+          <aside class="sn"><b>コサインスケジューリング</b>：マスク率を 0〜1 で滑らかに変える関数 γ。学習と推論（段階的生成）の難易度を整合させる。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src" style="text-align:center">γ(τ<sub>i</sub>) = cos(πτ<sub>i</sub>/2) ∈ [0,1],  τ<sub>i</sub> ∼ 𝒰(0,1)</p>
+          <div class="eq">γ(τ<sub>i</sub>) = cos( πτ<sub>i</sub> / 2 ) ∈ [0, 1]<br>τ<sub>i</sub> ∼ 𝒰(0, 1) <span class="num">(3)</span></div>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>γ と τ</b>：τ<sub>i</sub> は一様分布 𝒰(0,1) からの乱数。γ(τ<sub>i</sub>) がその回のマスク率。τ が小さいほど γ は1に近く（多くマスク）、大きいほど0に近い。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">In the second stage, we employ <em>step unroll masking</em>, adopted from Kim et al. (2023b), where we remask a portion (γ(τ<sub>i+1</sub>)) of the predicted tokens with the lowest confidence scores and predict them again. This refines the predictions iteratively, aligning with the inference process, where tokens are progressively revealed. More details of the masking strategy are provided in appendix D. The masked tokens t̃ are then embedded using the <em>input process</em> module, consisting of a learnable embedding layer and a linear transformation. Then, 2D positional encodings, from Wang &amp; Liu (2021), are added to impose spatio-temporal structure on the embeddings. The updated embeddings, e<sup>0</sup> ∈ ℝ<sup>(2nj+1)×d̄</sup>, where d̄ is the transformer embedding dimension, are then passed through L blocks of the Inter-M transformer.</p>
+          <p class="dst">第2段階では、Kim et al. (2023b) から採用した<em>ステップアンロールマスク（step unroll masking）</em>を用いる。これは、予測されたトークンのうち確信度スコアが最も低い一部（γ(τ<sub>i+1</sub>)）を再マスクして再び予測する手法である。これは予測を反復的に洗練し、トークンが段階的に明かされていく推論過程と整合する。マスク戦略の詳細は付録 D に示す。マスクされたトークン t̃ は、続いて<em>入力処理（input process）</em>モジュール（学習可能な埋め込み層と線形変換からなる）を用いて埋め込まれる。次に、Wang &amp; Liu (2021) の2次元位置エンコーディングが加えられ、埋め込みに時空間構造を課す。更新された埋め込み e<sup>0</sup> ∈ ℝ<sup>(2nj+1)×d̄</sup>（d̄ は Transformer の埋め込み次元）は、Inter-M Transformer の L 個のブロックに通される。</p>
+        </div>
+      </div>
+
+      <h3 id="tr-3-2-2">3.2.2 Transformer block design（Transformerブロックの設計）</h3>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/fig2_block.png" alt="Figure 2 (c): Transformerブロックの設計">
+        <figcaption><b>Figure 2 (c).</b> Inter-M Transformer の各ブロック構成。Self Attention（人をまたぐ全体の依存）→ Split → 各人ごとの Spatio-Temporal Attention（人内の空間・時間）→ Cross Attention（人間の依存）→ FFN → Concat。テキスト条件 c は AdaLN-mod により各正規化へ注入される。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">As illustrated in Figure 2(c), each Inter-M block starts with a self-attention module (Vaswani et al., 2017) to model long-range, global dependencies within and between individuals. Then we introduce a novel shared spatio-temporal attention layer to model spatial and temporal dependencies within each individual's motion tokens. Finally, we employ a shared cross attention layer to model inter-individual dependencies. This design enables rich and dynamic modeling of spatio-temporal interactions, ensuring effective learning of both intra- and inter-individual relationships.</p>
+          <p class="dst">Figure 2(c) に示すように、各 Inter-M ブロックはまず<span class="tnote">自己注意（self-attention）</span>モジュール（Vaswani et al., 2017）から始まり、個人の中および間の長距離・大域的な依存関係をモデル化する。次に、新規の共有<span class="tnote">時空間注意（spatio-temporal attention）</span>層を導入し、各人のモーショントークン内の空間的・時間的依存関係をモデル化する。最後に、共有<span class="tnote">交差注意（cross attention）</span>層を用いて個人間の依存関係をモデル化する。この設計は時空間的相互作用の豊かで動的なモデル化を可能にし、人内・人間の双方の関係の効果的な学習を保証する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>自己注意 <span class="en">self-attention</span></b>：系列内の全トークン同士の関係を見る注意。ここでは二人をまたいだ大域的依存を捉える役割。</aside>
+          <aside class="sn"><b>時空間注意 <span class="en">spatio-temporal attention</span></b>：各人の内部で「同時刻の部位どうし（空間）」「同じ部位の時間方向（時間）」を別々に見る注意。本論文の新規要素で最も効く（Table 3）。</aside>
+          <aside class="sn"><b>交差注意 <span class="en">cross attention</span></b>：人 a の各トークンが人 b の全トークンを見る（逆も）。二人の噛み合いを担う。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Self Attention</b> Let e<sup>l−1</sup> ∈ ℝ<sup>(2nj+1)×d̄</sup> represent the input token embeddings to block l, where l ∈ {1,2,...L}. The block architecture begins with a self-attention module which computes attention scores for all tokens in the sequence using the standard scaled dot-product attention mechanism:</p>
+          <p class="dst"><b>自己注意</b> e<sup>l−1</sup> ∈ ℝ<sup>(2nj+1)×d̄</sup> をブロック l への入力トークン埋め込みとする（l ∈ {1,2,...L}）。ブロックのアーキテクチャは、標準的なスケーリング付き内積注意（scaled dot-product attention）機構を用いて系列中の全トークンの注意スコアを計算する自己注意モジュールから始まる。</p>
+          <div class="eq">Attn(Q, K, V) = softmax( QK<sup>⊤</sup> / √d̄ ) V <span class="num">(4)</span></div>
+          <p class="dst">ここでクエリ・キー・バリュー行列 Q, K, V は e<sub>l−1</sub> の線形射影である。自己注意モジュールの後にはフィードフォワードネットワーク（FFN）が続く。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>Q, K, V と ⊤</b>：Query/Key/Value。⊤ は転置。QK<sup>⊤</sup> でトークン間の類似度を測り、√d̄ で割って softmax、V を重み付き和する。標準的な注意の式。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Spatio-Temporal Attention</b> Next, we split the embeddings of the two individuals and pass them through a shared spatio-temporal attention module. This module consists of two separate attention mechanisms: spatial attention and temporal attention. In the spatial attention module, each token attends only to other spatial tokens within the same temporal instance; and in the temporal attention module, each token attends only to tokens across the temporal dimension at the same spatial location. Let e<sub>p</sub><sup>l−1</sup> represent the updated embeddings of individual p ∈ {a,b} in block l after the self attention module. We drop the l − 1 superscript to simplify the notation. Then e<sub>p</sub>(i<sub>n</sub>) ∈ ℝ<sup>j×d̄</sup> represent the spatial tokens of individual p at temporal instance i<sub>n</sub>, and e<sub>p</sub>(i<sub>j</sub>) ∈ ℝ<sup>n×d̄</sup> represent the temporal tokens of individual p at spatial location i<sub>j</sub>. The spatial and temporal attention is defined as:</p>
+          <p class="dst"><b>時空間注意</b> 次に、二人の埋め込みを分割し、共有の時空間注意モジュールに通す。このモジュールは2つの別個の注意機構、すなわち<span class="tnote">空間注意（spatial attention）</span>と<span class="tnote">時間注意（temporal attention）</span>からなる。空間注意モジュールでは、各トークンは同じ時間インスタンス内の他の空間トークンにのみ注意を向ける。時間注意モジュールでは、各トークンは同じ空間位置における時間方向のトークンにのみ注意を向ける。e<sub>p</sub><sup>l−1</sup> を、自己注意モジュール後のブロック l における個人 p ∈ {a,b} の更新済み埋め込みとする。記法を簡単にするため l − 1 の上付きを省く。すると e<sub>p</sub>(i<sub>n</sub>) ∈ ℝ<sup>j×d̄</sup> は時間インスタンス i<sub>n</sub> における個人 p の空間トークンを、e<sub>p</sub>(i<sub>j</sub>) ∈ ℝ<sup>n×d̄</sup> は空間位置 i<sub>j</sub> における個人 p の時間トークンを表す。空間注意と時間注意は次のように定義される。</p>
+          <div class="eq">e′<sub>p</sub>(i<sub>n</sub>) = Attn(Q<sub>j</sub>, K<sub>j</sub>, V<sub>j</sub>)   e″<sub>p</sub>(i<sub>j</sub>) = Attn(Q<sub>n</sub>, K<sub>n</sub>, V<sub>n</sub>) <span class="num">(5)</span></div>
+          <p class="dst">ここで Q<sub>j</sub>, K<sub>j</sub>, V<sub>j</sub> と Q<sub>n</sub>, K<sub>n</sub>, V<sub>n</sub> は、それぞれ e<sub>p</sub>(i<sub>n</sub>) と e<sub>p</sub>(i<sub>j</sub>) から得られた空間のクエリ・キー・バリューと時間のクエリ・キー・バリューである。空間注意と時間注意で埋め込みを更新したのち、これら2つのモジュールの出力は各トークンごとに足し合わされる。</p>
+          <div class="eq">e<sub>p</sub> = e′<sub>p</sub>(i<sub>n</sub>) + e″<sub>p</sub>(i<sub>j</sub>)   ∀ 0 &lt; i<sub>n</sub> &lt; n, 0 &lt; i<sub>j</sub> &lt; j <span class="num">(6)</span></div>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>空間注意 <span class="en">spatial</span></b>：同じ時刻 i<sub>n</sub> の中で、部位（関節）どうしの関係を見る（j 個）。例：同時刻の右手と左足の関係。</aside>
+          <aside class="sn"><b>時間注意 <span class="en">temporal</span></b>：同じ部位 i<sub>j</sub> について、時間方向の関係を見る（n 個）。例：右手が時間とともにどう動くか。</aside>
+          <aside class="sn"><b>e′ と e″</b>：プライムは空間注意の出力、ダブルプライムは時間注意の出力。両者を加算して融合する（式6）。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Cross Attention</b> Next, we apply a shared cross attention module to model dependencies between the two individuals. Each token of individual a attends to all tokens of individual b and vice versa:</p>
+          <p class="dst"><b>交差注意</b> 次に、共有の交差注意モジュールを適用して二人の間の依存関係をモデル化する。個人 a の各トークンは個人 b の全トークンに注意を向け、その逆も同様である。</p>
+          <div class="eq">e′<sub>a</sub> = Attn(Q<sub>a</sub>, K<sub>b</sub>, V<sub>b</sub>)   e′<sub>b</sub> = Attn(Q<sub>b</sub>, K<sub>a</sub>, V<sub>a</sub>) <span class="num">(7)</span></div>
+          <p class="dst">ここで Q<sub>a</sub>, K<sub>a</sub>, V<sub>a</sub> と Q<sub>b</sub>, K<sub>b</sub>, V<sub>b</sub> は、各個人の埋め込み e<sub>a</sub>, e<sub>b</sub> から得られたクエリ・キー・バリューである。最後に、各個人の埋め込みはもう一つの FFN に通され、連結されて系列 e<sup>l</sup> ∈ ℝ<sup>(2nj+1)×d̄</sup> を形成し、次のブロックへ渡される。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>交差の向き</b>：a のクエリ Q<sub>a</sub> が b のキー・バリュー K<sub>b</sub>, V<sub>b</sub> を参照（式7左）。「相手から情報を引く」のが交差注意。逆向きも対称に行う。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Text Conditioning</b> We condition our transformer blocks on the input text by replacing the standard layer normalization in each attention and FFN module with modulated adaptive layer normalization (AdaLN-mod) as proposed by Peebles &amp; Xie (2023). In AdaLN-mod, the dimension-wise scale and shift parameters are regressed using a multi-layer perceptron (MLP), from the conditional vector c, obtained from a frozen, pre-trained CLIP network (Radford et al., 2021). This modulation allows the model to dynamically adapt its normalization based on the content of c. Additionally, we initialize each residual connection in the transformer block as an identity function by regressing another scale parameter α from c, which is initialized to output a zero vector. This ensures that the network can adapt the modulation during learning without imposing strong biases at initialization.</p>
+          <p class="dst"><b>テキスト条件付け</b> 各注意モジュールと FFN モジュール内の標準的な層正規化（layer normalization）を、Peebles &amp; Xie (2023) が提案した<span class="tnote">変調適応層正規化（AdaLN-mod）</span>に置き換えることで、Transformerブロックを入力テキストで条件付ける。AdaLN-mod では、次元ごとのスケールとシフトのパラメータが、凍結された事前学習済み <span class="tnote">CLIP</span> ネットワーク（Radford et al., 2021）から得られる条件ベクトル c から、多層パーセプトロン（MLP）を用いて回帰される。この変調により、モデルは c の内容に基づいて正規化を動的に適応できる。さらに、Transformerブロック内の各<span class="tnote">残差接続（residual connection）</span>を恒等関数として初期化する。これは c からもう一つのスケールパラメータ α を回帰することで行い、α はゼロベクトルを出力するよう初期化される。これにより、初期化時に強いバイアスを課すことなく、ネットワークが学習中に変調を適応できることを保証する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>AdaLN-mod <span class="en">modulated adaptive layer normalization</span></b>：正規化のスケール・シフトを、条件 c から作ったパラメータで動的に変える方式（DiT 由来）。テキストの注入口。</aside>
+          <aside class="sn"><b>CLIP</b>：画像・テキストを同じ空間に埋め込む事前学習済みモデル。ここではテキストを条件ベクトル c に変換する（凍結＝学習しない）。</aside>
+          <aside class="sn"><b>残差接続を恒等で初期化</b>：α=0 で始めると最初は「何も足さない」状態。学習が進むにつれ変調が効き始め、初期の暴れを防ぐ。</aside>
+        </div>
+      </div>
+
+      <h3 id="tr-3-2-3">3.2.3 Output Process（出力処理）</h3>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">After the final block, we use a standard linear projector with AdaLN-mod to map the output e<sup>L</sup> to the indices of codebook C, e<sub>out</sub> ∈ ℝ<sup>2nj×|C|</sup>, where |C| represents the size of C. As defined in eq. (8), the transformer's training objective minimizes the negative log-likelihood of the masked tokens, computed as the cross-entropy between the one-hot encoded ground truth and model predictions.</p>
+          <p class="dst">最終ブロックの後、AdaLN-mod を備えた標準的な線形射影器を用いて、出力 e<sup>L</sup> をコードブック C のインデックスへ写像する。すなわち e<sub>out</sub> ∈ ℝ<sup>2nj×|C|</sup> であり、|C| は C のサイズを表す。式 (8) に定義されるように、Transformerの学習目的関数は、マスクされたトークンの<span class="tnote">負の対数尤度</span>を最小化する。これは one-hot 符号化された正解とモデル予測との間の<span class="tnote">交差エントロピー（cross-entropy）</span>として計算される。</p>
+          <div class="eq">𝓛<sub>mask</sub> = ∑<sub>t̃<sub>k</sub>=[MASK]</sub> − log p<sub>θ</sub>(t<sub>k</sub> | t̃, c). <span class="num">(8)</span></div>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>負の対数尤度／交差エントロピー</b>：マスク位置 t̃<sub>k</sub>=[MASK] についてのみ、正解トークン t<sub>k</sub> をどれだけ高確率で当てたかを損失化。p<sub>θ</sub>(·|t̃, c) はマスク列 t̃ とテキスト c の下での予測確率。</aside>
+        </div>
+      </div>
+
+      <h3 id="tr-3-3">3.3 Inference（推論）</h3>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/fig3_inference.png" alt="Figure 3: 推論過程">
+        <figcaption><b>Figure 3.</b> 推論過程。両者の完全にマスクされたトークン列 {t<sub>a</sub>(0), t<sub>b</sub>(0)} から出発し、Inter-M Transformer が I 回の反復で全トークンを生成する。次に、生成されたトークンを脱量子化し、VQ-VAE デコーダでモーション系列 {m<sub>a</sub>, m<sub>b</sub>} へデコードする。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">As illustrated in Figure 3, the inference process consists of two stages. Starting with a fully masked sequence t(0), the Inter-M transformer generates tokens for both individuals over I iterations. At each iteration i, the transformer predicts token probabilities at masked locations, then samples tokens and remasks those with the lowest ⌈γ(i/I)·2nj⌉ confidence scores, repeating until i reaches I. The final token sequence is decoded back into motion using the VQ-VAE decoder. A cosine schedule γ(i/I) controls the number of retained tokens, increasing as i progresses. Classifier-free guidance (Ho &amp; Salimans, 2021) is also applied for refinement, following Chang et al. (2022).</p>
+          <p class="dst">Figure 3 に示すように、推論過程は2つの段階からなる。完全にマスクされた系列 t(0) から出発し、Inter-M Transformer は I 回の反復にわたって両者のトークンを生成する。各反復 i において、Transformerはマスクされた位置でのトークン確率を予測し、続いてトークンをサンプリングして、確信度スコアが最も低い ⌈γ(i/I)·2nj⌉ 個を再マスクする。これを i が I に達するまで繰り返す。最終的なトークン系列は、VQ-VAE デコーダを用いてモーションへとデコードし直される。コサインスケジュール γ(i/I) は保持するトークン数を制御し、i が進むにつれて増加する。さらに、Chang et al. (2022) に倣い、洗練のために<span class="tnote">分類器なしガイダンス（classifier-free guidance）</span>（Ho &amp; Salimans, 2021）も適用される。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>段階的生成</b>：全マスクから始め、毎反復で確信度の高い予測だけ確定、低いものを再マスク→再予測。⌈·⌉ は天井関数。保持トークン数は γ で徐々に増える。</aside>
+          <aside class="sn"><b>分類器なしガイダンス <span class="en">classifier-free guidance</span></b>：条件あり／なしの予測を組み合わせ、テキスト条件への忠実度を強める推論技法。</aside>
+        </div>
+      </div>
+
+      <!-- ========== 4 Experiments ========== -->
+      <h2 id="tr-4"><span class="tr-sec-num">4</span>Experiments（実験）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Datasets</b> We adopt two datasets to evaluate InterMask for the text-conditioned human interaction generation task: InterHuman (Liang et al., 2024) and InterX (Xu et al., 2024a). The InterHuman dataset contains 7,779 interaction sequences and InterX contains 11,388, each paired with 3 distinct textual annotations. InterHuman follows the AMASS (Mahmood et al., 2019) skeleton representation with 22 joints, including the root joint. Each joint is represented by [p<sub>g</sub>, v<sub>g</sub>, r<sub>6d</sub>], where p<sub>g</sub> ∈ ℝ<sup>3</sup> is the global position, v<sub>g</sub> ∈ ℝ<sup>3</sup> is the global velocity, and r<sub>6d</sub> ∈ ℝ<sup>6</sup> is the local 6D rotation of each joint, rendering m<sub>p</sub> ∈ ℝ<sup>N×22×12</sup>. InterX follows the SMPL-X (Pavlakos et al., 2019) skeleton representation, comprising 54 body, hands and face joints. Each joint and root orientation is represented by [r<sub>6d</sub>] and root translation by [p<sub>g</sub>], to which we incorporate root velocity rendering root [p<sub>g</sub>, v<sub>g</sub>] and m<sub>p</sub> ∈ ℝ<sup>N×56×6</sup>. We adhere to the respective body representations of both datasets to demonstrate that our framework is compatible with different representation formats and joint counts. Other implementation details are provided in appendix E.</p>
+          <p class="dst"><b>データセット</b> テキスト条件付き人間相互作用生成タスクで InterMask を評価するために、2つのデータセット、すなわち <span class="tnote">InterHuman</span>（Liang et al., 2024）と <span class="tnote">InterX</span>（Xu et al., 2024a）を採用する。InterHuman データセットは 7,779 個の相互作用系列を、InterX は 11,388 個を含み、それぞれが3つの異なるテキストアノテーションと対になっている。InterHuman は、ルート関節を含む22関節を持つ AMASS（Mahmood et al., 2019）の骨格表現に従う。各関節は [p<sub>g</sub>, v<sub>g</sub>, r<sub>6d</sub>] で表現される。ここで p<sub>g</sub> ∈ ℝ<sup>3</sup> は大域位置、v<sub>g</sub> ∈ ℝ<sup>3</sup> は大域速度、r<sub>6d</sub> ∈ ℝ<sup>6</sup> は各関節の局所6D回転であり、m<sub>p</sub> ∈ ℝ<sup>N×22×12</sup> を成す。InterX は SMPL-X（Pavlakos et al., 2019）の骨格表現に従い、体・手・顔の54関節からなる。各関節とルート向きは [r<sub>6d</sub>]、ルート並進は [p<sub>g</sub>] で表現され、これにルート速度を組み込んでルートを [p<sub>g</sub>, v<sub>g</sub>] とし、m<sub>p</sub> ∈ ℝ<sup>N×56×6</sup> を成す。両データセットそれぞれの体表現に従うことで、本フレームワークが異なる表現形式や関節数と互換であることを示す。その他の実装詳細は付録 E に示す。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>6D 回転 <span class="en">r<sub>6d</sub></span></b>：回転を6次元で表す表現。オイラー角やクォータニオンより学習が安定するとされる。p<sub>g</sub>=位置、v<sub>g</sub>=速度。</aside>
+          <aside class="sn"><b>2データセットの違い</b>：InterHuman=AMASS系・22関節・各関節12次元。InterX=SMPL-X系・54(→56)関節・各6次元。同じ手法が両方で動くことが頑健性の主張。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Evaluation Metrics</b> Following Liang et al. (2024), we adopt several feature-space evaluation metrics to assess the performance of our model. These include the Frechet Inception Distance (FID), which measures the fidelity of the generated interactions by calculating similarity between the generated and real interactions feature distributions. Additionally we employ R-precision and MMDist, which evaluate how well the generated interactions align with the corresponding texts. Furthermore, we use Diversity to measure the overall variation in generated interactions, and multimodality (MModality) to quantify the ability to generate multiple distinct interactions for the same text.</p>
+          <p class="dst"><b>評価指標</b> Liang et al. (2024) に倣い、モデルの性能を評価するためにいくつかの特徴空間の評価指標を採用する。これには <span class="tnote">FID（Frechet Inception Distance）</span>が含まれ、これは生成された相互作用と本物の相互作用の特徴分布間の類似度を計算することで、生成された相互作用の忠実度を測る。さらに、<span class="tnote">R-precision と MMDist</span> を用い、生成された相互作用が対応するテキストとどれだけよく整合するかを評価する。加えて、<span class="tnote">Diversity</span> を用いて生成された相互作用の全体的なばらつきを測り、<span class="tnote">マルチモダリティ（MModality）</span>を用いて同じテキストに対して複数の異なる相互作用を生成する能力を定量化する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>FID</b>：本物との特徴分布の近さ。<b>小さいほど良い</b>。</aside>
+          <aside class="sn"><b>R-precision / MM Dist</b>：テキストとの整合度。R-precision（Top1〜3）は<b>大きいほど良い</b>、MM Dist は<b>小さいほど良い</b>。</aside>
+          <aside class="sn"><b>Diversity / MModality</b>：生成の多様性。いずれも<b>GT（本物）に近いほど良い</b>（MModality は同一テキストでの作り分けを測る）。</aside>
+        </div>
+      </div>
+
+      <h3 id="tr-4-1">4.1 Comparison with state-of-the-art approaches（最先端手法との比較）</h3>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src"><b>Quantitative Comparison</b> Table 1 shows quantitative comparison of our InterMask with previous methods. All evaluations are run 20 times (with the exception of MModality, which is run 5 times), and we report the averaged results along with a 95% confidence interval. InterMask achieves state-of-the-art (SOTA) results on both InterHuman and InterX datasets. It records the lowest FID scores (5.154 on InterHuman and 0.399 on InterX), indicating superior realism and quality of generated interactions, and leads in R-Precision and MMdist, showing excellent text alignment. With different body representations in each dataset, these results highlight the robustness of our method, proving it is not dependent on a specific body pose structure. Furthermore, the larger performance gap on the larger InterX dataset suggests that InterMask scales effectively with more data. While our MModality is slightly lower than some methods, the high R-Precision and low MMdist emphasize that InterMask prioritizes adherence to text over extreme diversity, yet still achieves high Diversity scores, demonstrating its ability to generate a broad range of interactions. Please refer to appendix F for visual demonstration of InterMask's ability to generate diverse results from the same text prompt.</p>
+          <p class="dst"><b>定量比較</b> Table 1 に、本手法 InterMask と先行手法との定量比較を示す。すべての評価は20回（ただし MModality は5回）実行し、95% 信頼区間とともに平均結果を報告する。InterMask は InterHuman と InterX の両データセットで最先端（SOTA）の結果を達成する。最も低い FID スコア（InterHuman で 5.154、InterX で 0.399）を記録し、生成される相互作用の優れた写実性と品質を示すとともに、R-Precision と MMdist で首位に立ち、優れたテキスト整合を示す。各データセットで体表現が異なるにもかかわらず得られたこれらの結果は、本手法の頑健性を浮き彫りにし、特定の体ポーズ構造に依存しないことを証明する。さらに、より大きい InterX データセットでの性能差がより大きいことは、InterMask がより多くのデータと共に効果的にスケールすることを示唆する。本手法の MModality は一部の手法よりわずかに低いものの、高い R-Precision と低い MMdist は、InterMask が極端な多様性よりもテキストへの忠実さを優先することを強調する。それでもなお高い Diversity スコアを達成しており、広範な相互作用を生成する能力を実証している。同じテキストプロンプトから多様な結果を生成する InterMask の能力の視覚的な実演については、付録 F を参照されたい。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/tab1_quant.png" alt="Table 1: InterHuman・InterXでの定量評価">
+        <figcaption><b>Table 1.</b> InterHuman と InterX のテストセットでの定量評価。± は95%信頼区間、→ は GT に近いほど良いことを表す。<b>太字</b>が最良、<u>下線</u>が次点。InterMask は両データセットで最低 FID（5.154 / 0.399）を達成。</figcaption>
+      </figure>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src"><b>Qualitative Comparison</b> In Figure 4 we provide a qualitative comparison of interaction sequences generated by our InterMask and InterGen (Liang et al. (2024)), trained on the InterHuman dataset, for the same text descriptions. For the prompt "<em>The first person raises the right leg aggressively towards the second</em>", InterGen incorrectly raises both legs, while InterMask accurately raises only the right leg. For "<em>Two people bow to each other</em>", InterGen introduces an unnecessary fighting gesture after the bow, indicating overfitting to implicit biases in the training data, whereas InterMask stays true to the simple bow. Lastly, for "<em>One person is sitting and waving their hands at the other person, while the other drifts away</em>", InterGen generates a crouching pose instead of sitting and misplaces the waving action, while InterMask faithfully generates the described scene. These examples demonstrate that InterMask produces more higher quality and more reliable interactions compared to InterGen. For more qualitative results please refer to appendix A.</p>
+          <p class="dst"><b>定性比較</b> Figure 4 に、InterHuman データセットで学習した本手法 InterMask と InterGen（Liang et al. (2024)）が同じテキスト記述に対して生成した相互作用系列の定性比較を示す。「<em>一人目が二人目に向かって右脚を激しく上げる</em>」というプロンプトに対し、InterGen は誤って両脚を上げてしまうのに対し、InterMask は正確に右脚だけを上げる。「<em>二人がお互いにお辞儀をする</em>」では、InterGen はお辞儀の後に不要な格闘の身振りを導入し、これは学習データ中の暗黙のバイアスへの過適合を示すが、InterMask は単純なお辞儀に忠実である。最後に「<em>一人が座って相手に向かって手を振り、もう一人は漂うように離れていく</em>」では、InterGen は座る代わりにしゃがむ姿勢を生成し、手を振る動作を取り違えるが、InterMask は記述された情景を忠実に生成する。これらの例は、InterMask が InterGen に比べてより高品質で信頼性の高い相互作用を生成することを実証する。さらなる定性結果については付録 A を参照されたい。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/fig4_qualitative.png" alt="Figure 4: InterGenとInterMaskの定性比較">
+        <figcaption><b>Figure 4.</b> InterGen（左）と InterMask（右）の定性比較。InterMask の優れた相互作用品質・テキスト忠実度・暗黙バイアスの回避を示す。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>User Study</b> User studies are essential in generative AI, complementing metrics like FID by incorporating human perception to evaluate the realism and quality of generated content. To compare our InterMask with InterGen (Liang et al., 2024), we conducted a user study with 16 participants, where 30 interaction sequences were generated by both models with identical motion lengths. Each sequence pair was rated by 3 distinct users on interaction quality and adherence to text (scores out of 5), and their preferred interaction sequence among the two. More details are provided in appendix K. As shown in Figure 5, InterMask outperforms InterGen in interaction quality (4.089 vs. 3.296) and text adherence (3.938 vs. 3.198), with 69.14% of users preferring InterMask over InterGen.</p>
+          <p class="dst"><b>ユーザースタディ</b> ユーザースタディは生成 AI において不可欠であり、人間の知覚を取り入れて生成コンテンツの写実性と品質を評価することで、FID のような指標を補完する。本手法 InterMask を InterGen（Liang et al., 2024）と比較するために、16名の参加者によるユーザースタディを実施した。ここでは30個の相互作用系列を、両モデルで同一のモーション長で生成した。各系列ペアは3名の異なるユーザーによって、相互作用品質とテキストへの忠実度（5点満点）、および2つのうち好ましい相互作用系列について評価された。詳細は付録 K に示す。Figure 5 に示すように、InterMask は相互作用品質（4.089 対 3.296）とテキスト忠実度（3.938 対 3.198）で InterGen を上回り、69.14% のユーザーが InterGen より InterMask を好んだ。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>スコアの読み方</b>：相互作用品質・テキスト忠実度はいずれも5点満点で<b>高いほど良い</b>。選好率69.14%は「2つを並べてどちらが良いか」での InterMask 支持割合。</aside>
+        </div>
+      </div>
+
+      <figure class="tr-fig">
+        <img src="../../assets/img/intermask/fig5_userstudy.png" alt="Figure 5: InterGenとInterMaskのユーザースタディ">
+        <figcaption><b>Figure 5.</b> InterGen と InterMask を比較するユーザースタディ。相互作用品質・テキスト忠実度のスコアと総合選好率のすべてで InterMask が上回る。</figcaption>
+      </figure>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src"><b>Computation and Time Cost</b> In addition to superior generation fidelity and text adherence, InterMask demonstrates better computational efficiency when compared to InterGen (Liang et al., 2024). InterMask contains only 74 M inference parameters, compared to 182 M for InterGen, resulting in a considerably smaller model footprint. Furthermore, InterMask achieves an average inference time of 0.77 seconds, less than half of InterGen's 1.63 seconds, highlighting its low latency.</p>
+          <p class="dst"><b>計算量と時間コスト</b> 優れた生成忠実度とテキスト忠実度に加えて、InterMask は InterGen（Liang et al., 2024）と比較してより良い計算効率を実証する。InterMask は推論パラメータをわずか 74 M しか持たず、InterGen の 182 M に比べてかなり小さいモデルフットプリントを実現する。さらに、InterMask は平均推論時間 0.77 秒を達成し、これは InterGen の 1.63 秒の半分未満であり、その低遅延を際立たせる。</p>
+        </div>
+      </div>
+
+      <h3 id="tr-4-2">4.2 Ablation Studies（アブレーション研究）</h3>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Table 2 presents an ablation study to evaluate key components of our proposed <em>Motion VQ-VAE</em>. We investigated two primary factors: the input modality (individual motions vs two-person interactions) and the token map dimensions (1d vs 2d), using Reconstruction FID and MPJPE (Mean Per Joint Position Error). The results demonstrate that using individual motions as input with a 2D token map outperforms both the baseline of individual motions with a 1D token map, and the two-person interaction with a 2D token map. These findings suggest that preserving spatial information through 2D token maps and focusing on individual motions performs accurate motion reconstruction, and creates a more expressive token map with high-fidelity movement details.</p>
+          <p class="dst">Table 2 に、提案する <em>Motion VQ-VAE</em> の主要な構成要素を評価するアブレーション研究を示す。我々は2つの主要因、すなわち入力モダリティ（個人モーション 対 二人相互作用）とトークン地図の次元（1d 対 2d）を、再構成 FID と <span class="tnote">MPJPE（Mean Per Joint Position Error）</span>を用いて調査した。結果は、2Dトークン地図で個人モーションを入力に用いる方式が、1Dトークン地図で個人モーションを用いるベースライン、および2Dトークン地図で二人相互作用を用いる方式の両方を上回ることを実証する。これらの知見は、2Dトークン地図によって空間情報を保持し個人モーションに集中することが、正確なモーション再構成を行い、高忠実度の動きの詳細を持つより表現力のあるトークン地図を作ることを示唆する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>MPJPE <span class="en">Mean Per Joint Position Error</span></b>：関節位置の平均誤差。再構成精度の指標で<b>小さいほど良い</b>。Recon FID も<b>小さいほど良い</b>。</aside>
+        </div>
+      </div>
+
+      <figure class="tr-fig">
+        <img src="../../assets/img/intermask/tab2_vqvae.png" alt="Table 2: Motion VQ-VAEのアブレーション">
+        <figcaption><b>Table 2.</b> InterHuman テストセットでの Motion VQ-VAE の主要要素を検証するアブレーション結果。<b>太字</b>が最良。「個人モーション × 2D地図」が Recon FID 0.970 / MPJPE 0.129 で最良。</figcaption>
+      </figure>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">Table 3 presents an ablation study to evaluate key components of our <em>Inter-M Transformer</em>. We compared collaborative modeling against alternative modeling and examined the impact of various attention mechanisms and masking strategies. <em>Alternative Modeling</em> (appendix G) models tokens of one person at a time, while conditioning in on the tokens of the other person, leading to an alternative generation during inference. <em>Collaborative Modeling</em> on the other hand, models tokens of both individuals simultaneously. Our full InterMask model with collaborataive modeling outperforms all ablated versions in R-Precision and FID scores. Notably, removing any of the attention mechanisms or employing alternative modeling severely degraded performance, with spatio-temporal attention being the most crucial one. Additionally, step unroll and interaction masking proved to be further fine-tuning the results. These results highlight the synergistic importance of all components in our transformer architecture for effective interaction modeling. Qualitative results for selected ablation studies are shown in appendix H.</p>
+          <p class="dst">Table 3 に、本手法の <em>Inter-M Transformer</em> の主要な構成要素を評価するアブレーション研究を示す。我々は協調的モデリング（collaborative modeling）を交互的モデリング（alternative modeling）と比較し、各種の注意機構とマスク戦略の影響を調べた。<em>交互的モデリング</em>（付録 G）は、一方の人物のトークンを、他方の人物のトークンを条件としながら一度に一人ずつモデル化するもので、推論時には交互的な生成につながる。一方、<em>協調的モデリング</em>は両者のトークンを同時にモデル化する。協調的モデリングを備えた完全な InterMask モデルは、R-Precision と FID スコアにおいてすべてのアブレーション版を上回る。特に、いずれかの注意機構を取り除くこと、または交互的モデリングを用いることは性能を著しく劣化させ、時空間注意が最も決定的であった。さらに、ステップアンロールと相互作用マスクは結果をさらに微調整することが分かった。これらの結果は、効果的な相互作用モデリングのために、本Transformerアーキテクチャのすべての構成要素が相乗的に重要であることを浮き彫りにする。一部のアブレーション研究の定性結果は付録 H に示す。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/tab3_ablation.png" alt="Table 3: Inter-M Transformerのアブレーション">
+        <figcaption><b>Table 3.</b> InterHuman テストセットでの Inter-M Transformer の主要要素を検証するアブレーション結果。<b>太字</b>が最良。注意機構の除去や交互的モデリングは性能を大きく落とし、特に時空間注意の除去が最も悪化する。</figcaption>
+      </figure>
+
+      <h3 id="tr-4-3">4.3 Application: Reaction Generation（応用: 反応生成）</h3>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">One of the key strengths of our InterMask model is its seamless support for the task of reaction generation with or without a text condition, where the motion of one person in an interaction is generated based on the provided reference motion of the other person. Unlike previous diffusion-based models, such as InterGen (Liang et al., 2024), InterMask can perform this task without any task-specific fine-tuning or architectural re-design. This flexibility arises from our use of the masked modeling technique combined with an individual motion tokenizer, which does not require interactions as input. During inference, we simply tokenize the reference motion, leave its tokens unmasked, and progressively generate tokens of the other person. More details are provided in appendix I.</p>
+          <p class="dst">本手法 InterMask モデルの主要な強みの一つは、テキスト条件の有無にかかわらず反応生成タスクをシームレスに支援できることである。反応生成では、相互作用における一方の人物の動きが、提供されたもう一方の人物の参照モーションに基づいて生成される。InterGen（Liang et al., 2024）のような従来の拡散ベースのモデルとは異なり、InterMask はタスク固有の微調整やアーキテクチャの再設計を一切行わずにこのタスクを実行できる。この柔軟性は、相互作用を入力として必要としない個人モーショントークナイザと組み合わせた<span class="tnote">マスクモデリング技法</span>を用いることに由来する。推論時には、参照モーションをトークン化し、そのトークンをマスクせずに残し、もう一方の人物のトークンを段階的に生成するだけでよい。詳細は付録 I に示す。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>なぜ無調整でできるか</b>：学習時の「相互作用マスク」で片方を丸ごと見せてもう片方を当てる練習をしている。反応生成は、参照側を全部 unmask にするだけで同じ枠組みに乗る。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">Quantitatively, InterMask achieves an FID of 2.99 and an R-precision of 0.462 on InterHuman for reaction generation. In comparison, InterGen suffers from a performance drop with an FID of 52.89 (vs 5.918 for interaction generation) and an R-precision of 0.194 (vs 0.371) when adopted for reaction generation without fine-tuning, demonstrating its inability to perform reaction generation out-of-the-box. As shown qualitatively in Figure 6, InterMask produces high-quality reaction motions. In cases without text conditioning, when the reference motion involves dancing, the generated motion follows the reference steps and even captures nuanced details like raising the same leg or arm. Similarly, for the physical combat scenario, when the reference motion attacks, the generated motion retreats and vice versa. For text-conditioned samples, InterMask performs equally well, whether the text describes both people's motions or provides separate descriptions for each. The model accurately identifies the required reaction form text and the reference motion and generates the corresponding motion, maintaining high-quality poses and realistic timings throughout.</p>
+          <p class="dst">定量的には、InterMask は反応生成において InterHuman で FID 2.99、R-precision 0.462 を達成する。比較すると、InterGen は微調整なしで反応生成に適用された場合、FID 52.89（相互作用生成の 5.918 に対して）、R-precision 0.194（0.371 に対して）と性能低下に見舞われ、反応生成をそのまま（out-of-the-box）実行できないことを示す。Figure 6 に定性的に示すように、InterMask は高品質な反応モーションを生成する。テキスト条件のない場合、参照モーションがダンスを含むとき、生成されたモーションは参照のステップに従い、同じ脚や腕を上げるといった微妙な詳細さえ捉える。同様に、身体的格闘のシナリオでは、参照モーションが攻撃すると生成されたモーションは後退し、その逆も成り立つ。テキスト条件付きのサンプルでは、テキストが二人の動きを記述する場合でも、各人に別々の記述を与える場合でも、InterMask は同等によく機能する。モデルは必要な反応をテキストと参照モーションから正確に同定し、対応するモーションを生成して、全体を通して高品質な姿勢と写実的なタイミングを保つ。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/intermask/fig6_reaction.png" alt="Figure 6: 反応生成のサンプル">
+        <figcaption><b>Figure 6.</b> 反応生成のサンプル（テキスト記述あり／なし、二人ぶんの一括指示と各人別指示を含む）。赤＝参照モーション、青＝生成モーション。参照の動きに応じて自然に応答する。</figcaption>
+      </figure>
+
+      <!-- ========== 5 Conclusion ========== -->
+      <h2 id="tr-5"><span class="tr-sec-num">5</span>Conclusion（結論）</h2>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">In this paper, we presented InterMask, a novel framework for generating realistic 3D human interactions through generative masked modeling in the discrete space. InterMask first employs a VQ-VAE to transform individual motion sequences into 2D discrete token maps, preserving both spatial and temporal dimensions. Then, a specialized Inter-M transformer collaboratively models the motion tokens of both individuals, capturing intricate spatial and temporal dependencies within and between them. Quantitative evaluations show that InterMask excels in generating realistic and contextually aligned motions, achieving the lowest FID scores and superior results in R-Precision and MMdist on both the InterHuman and InterX datasets compared to existing models. Additionally, user studies comparing InterMask to InterGen reveal a 69% user preference for InterMask, noting higher-quality and more realistic interactions. The flexibility of our approach is also evident by its ability to perform equally well for different body representations. While there are minor trade-offs in diversity (MModality), InterMask consistently maintains high quality and adherence to text while generating a wide range of realistic interactions.</p>
+          <p class="dst">本論文では、離散空間における生成的マスクモデリングを通じて写実的な3次元の人間の相互作用を生成する新しいフレームワーク InterMask を提示した。InterMask はまず VQ-VAE を用いて個人モーション系列を2D離散トークン地図へ変換し、空間次元と時間次元の両方を保持する。次に、専用の Inter-M Transformerが両者のモーショントークンを協調的にモデル化し、二人の中および間の入り組んだ空間的・時間的依存関係を捉える。定量評価は、InterMask が写実的で文脈的に整合したモーションの生成に優れ、既存モデルと比較して InterHuman と InterX の両データセットで最低の FID スコアと、R-Precision・MMdist での優れた結果を達成することを示す。さらに、InterMask を InterGen と比較するユーザースタディは、より高品質でより写実的な相互作用を理由に、69% のユーザーが InterMask を好むことを明らかにする。本手法の柔軟性は、異なる体表現に対しても同等によく機能する能力によっても明らかである。多様性（MModality）には小さなトレードオフがあるものの、InterMask は広範な写実的相互作用を生成しつつ、高い品質とテキストへの忠実さを一貫して保つ。</p>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src"><b>Limitations and Future Work</b> While InterMask generates high-quality human interactions, there are some limitations. First, when visualized as SMPL (Loper et al. (2015)) meshes, issues such as body penetration between individuals and jerky movements during rapid actions can occur. Second, our model sometimes interprets motions as dances without explicit prompting, likely due to implicit biases in the training dataset. Lastly, our approach is currently optimized for short sequences up to 10 seconds, reflecting the constraints of the dataset. Visual examples are shown in appendix J. Future research directions include implementing techniques for smoother transitions, preventing penetrations, addressing dataset biases, and expanding the model's capacity to handle longer sequences.</p>
+          <p class="dst"><b>限界と今後の課題</b> InterMask は高品質な人間の相互作用を生成するが、いくつかの限界がある。第一に、SMPL（Loper et al. (2015)）メッシュとして可視化したとき、個人間の身体の貫通（body penetration）や、素早い動作の際のぎこちない動き（jerky movements）といった問題が生じうる。第二に、本モデルは明示的な指示がなくても、動きをダンスと解釈することがあり、これはおそらく学習データセット中の暗黙のバイアスによる。最後に、本手法は現在、データセットの制約を反映して最大10秒までの短い系列に最適化されている。視覚的な例は付録 J に示す。今後の研究方向には、より滑らかな遷移のための技法の実装、貫通の防止、データセットのバイアスへの対処、そしてより長い系列を扱えるようモデルの能力を拡張することが含まれる。</p>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src"><b>Reproducibility Statement</b> We have made our best effort to ensure reproducibility, including but not limited to: 1) description of our implementation details in appendix E; 2) detailed graphic illustrations of our model architectures, training mechanisms and inference processes in Figures 2, 3, 7, 8, 10 and 13; and 4) public release of code and model checkpoints (appendix A).</p>
+          <p class="dst"><b>再現性に関する記述</b> 我々は再現性を確保するために最善を尽くした。これには以下が含まれるが、これらに限らない。1) 付録 E における実装詳細の記述、2) Figure 2, 3, 7, 8, 10, 13 における、モデルアーキテクチャ・学習機構・推論過程の詳細な図解、そして 4) コードとモデルチェックポイントの公開（付録 A）。</p>
+        </div>
+      </div>
+
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap"><a class="back" href="../../index.html">← 一覧へ戻る</a></div>
+  </footer>
+
+  <script src="../../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HINT — 論文解説ノート</title>
+  <link rel="stylesheet" href="../../assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="home" href="../../index.html">📚 論文解説ノート</a>
+      <nav class="mode-switch" role="tablist" aria-label="表示モード">
+        <button data-mode="explain"   role="tab">📝 解説</button>
+        <button data-mode="translate" role="tab">📖 逐語訳</button>
+      </nav>
+      <a class="back" href="../../index.html">← 一覧へ</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- ===== 論文ヘッダー ===== -->
+    <section class="paper-head">
+      <div class="card-meta">arXiv:2601.20383v1 [cs.CV] · 2026</div>
+      <h1>HINT: Hierarchical Interaction Modeling for Autoregressive Multi-Human Motion Generation</h1>
+      <p class="authors">Mengge Liu, Yan Di, Gu Wang, Yun Qu, Dekai Zhu, Yanyan Li, Xiangyang Ji（Tsinghua University）</p>
+      <p class="authors">自己回帰的な複数人モーション生成のための階層的インタラクションモデリング</p>
+      <p class="links">
+        <a href="https://arxiv.org/abs/2601.20383" target="_blank" rel="noopener">arXiv</a>
+      </p>
+    </section>
+
+    <!-- ===== 解説モード ===== -->
+    <article class="mode-pane content" data-mode="explain">
+
+      <h2 id="tldr">ひとことで言うと</h2>
+      <div class="note key">
+        <span class="label">CORE IDEA</span>
+        テキスト駆動の<strong>複数人モーション生成</strong>を「自己回帰 × 拡散」で初めて解いた枠組み。
+        ① 各人のモーションを<strong>正準化潜在空間（自分中心のローカル座標）</strong>で符号化して
+        「動きそのもの」と「人と人の位置関係」を切り離し、
+        ② <strong>スライディングウィンドウ</strong>でローカル条件（窓内の履歴・相手・単語）とグローバル条件（窓位置・全体テキスト）を
+        階層的に与える。これにより<strong>長尺・可変長・可変人数</strong>の生成を、人数が増えても再学習なしで実現する。
+      </div>
+      <div class="note">
+        <span class="label">前提キーワード</span>
+        <strong>テキスト→モーション生成</strong>：「二人が手を振って挨拶する」のような文から3D人体の動き（関節の時系列）を作るタスク。
+        <strong>自己回帰（autoregressive）</strong>：未来を一気にではなく、過去の出力を条件に少しずつ先へ伸ばす生成方式。
+        <strong>拡散モデル（diffusion）</strong>：ノイズから徐々にデータを復元する生成器。ここでは潜在ベクトルを生成する。
+      </div>
+      <figure>
+        <img src="../../assets/img/hint/fig1_teaser.png" alt="HINTによる3人モーション生成の例">
+        <figcaption>Fig.1: テキストを切り替えながら、3人の一貫した動きを自己回帰的に生成（挨拶 → お辞儀 → 後退 → ジャンプ）。</figcaption>
+      </figure>
+
+      <h2 id="problem">背景と課題</h2>
+      <p>
+        従来のマルチヒューマン生成（InterGen / in2IN / InterMask など）は<strong>オフラインの「一発生成（single-shot）」</strong>。
+        つまり<strong>固定の長さ・固定の人数</strong>のモーションを丸ごと一度に出力する。これには次の限界がある。
+      </p>
+      <ul>
+        <li>可変長・長尺のテキスト記述や、途中で変化する相互作用パターンに弱い。</li>
+        <li>人数が変わると基本的に作り直し（再学習）が必要。</li>
+        <li>長距離の依存関係を捉えきれず、長い系列だと不整合・繰り返し動作になりやすい。</li>
+      </ul>
+      <p>
+        これらは自然に<strong>自己回帰</strong>での定式化を要求する ——
+        「過去の全軌跡＋現在のテキスト指示」を条件に、未来を逐次予測していく形だ。
+        しかし、複雑な相互作用を伴う<strong>複数人設定での自己回帰はほぼ未開拓</strong>だった。HINTはそこに踏み込む。
+      </p>
+      <figure>
+        <img src="../../assets/img/hint/fig2_comparison.png" alt="従来の一発生成とHINTの比較">
+        <figcaption>Fig.2: <strong>左＝従来の一発生成</strong>（固定長を一度に出力）。<strong>右＝HINT</strong>（履歴＋テキストから未来を窓ごとに逐次生成し、可変長でストリーミング）。</figcaption>
+      </figure>
+
+      <h2 id="method">提案手法（HINTの全体像）</h2>
+      <p>
+        問題設定は単純：<span class="kbd">N</span> 人の過去モーション ＋ テキスト <span class="kbd">T</span> を条件に、未来 <span class="kbd">K</span> ステップを予測することを繰り返す。
+        本文では履歴 <span class="kbd">H=4</span> フレーム、未来 <span class="kbd">K=16</span> フレームをまとめて予測する。
+      </p>
+
+      <div class="flow">
+        <div class="box"><b>① Motion VAE</b>生のモーションを<span class="sub">正準化した潜在ベクトル</span>へ符号化。学習後は<span class="sub">凍結</span>。</div>
+        <div class="arrow">→</div>
+        <div class="box"><b>② Interaction-Aware Diffusion</b>潜在空間上で、履歴・相手・テキストを条件に<span class="sub">次の窓の潜在</span>を生成。</div>
+        <div class="arrow">→</div>
+        <div class="box"><b>③ スライディングウィンドウ</b>生成した未来を履歴に継ぎ足し、<span class="sub">窓をずらして</span>次へ。自己回帰で無限に伸ばせる。</div>
+      </div>
+      <figure>
+        <img src="../../assets/img/hint/fig3_pipeline.png" alt="HINTのパイプライン: Motion VAEと自己回帰生成">
+        <figcaption>Fig.3 (a)(b): (a) 各人を正準化して潜在 <span class="kbd">z<sup>f</sup></span> に符号化する Motion VAE（学習後は凍結）。(b) Interaction-Aware Diffusion が履歴・相手・テキストから次の <span class="kbd">K</span> フレームの潜在を生成し、デコードして履歴に継ぎ足し自己回帰。</figcaption>
+      </figure>
+      <div class="note">
+        <span class="label">補足: Motion VAE</span>
+        DARTにならったTransformerベースのVAE。窓ごと（履歴 <span class="kbd">H</span> ＋ 未来 <span class="kbd">K</span>）にエンコーダ <span class="kbd">E</span> が潜在 <span class="kbd">z<sup>f</sup></span> を作り、
+        デコーダ <span class="kbd">D</span> が未来 <span class="kbd">K</span> フレームを復元する。先にこれだけを学習して<strong>凍結</strong>することで、拡散の学習中も潜在空間が安定・一貫する。
+      </div>
+
+      <h2 id="m-canonical">貢献1: 正準化潜在空間（Canonicalized Latent Space）</h2>
+      <p>
+        ここがHINTの肝。「各人の動き」と「人どうしの位置関係」を<strong>別物として扱う</strong>のがポイント。
+      </p>
+      <div class="compare">
+        <div class="col bad">
+          <h4>従来: 共有座標（JMLS）</h4>
+          <ul>
+            <li>両者の動きに<strong>同じ座標変換</strong>をかけて1つの潜在空間に詰め込む。</li>
+            <li>相対位置は保てるが、<strong>動きの意味と人間どうしの幾何が絡まる</strong>。</li>
+            <li>人数が変わると破綻しやすく、再学習が必要。</li>
+          </ul>
+        </div>
+        <div class="col good">
+          <h4>HINT: 正準化（CLS）</h4>
+          <ul>
+            <li>各人を<strong>自分のローカル座標</strong>に正準化（向きを <span class="kbd">+z</span>軸、ルート関節を原点へ）。</li>
+            <li>人どうしの<strong>相対回転 <span class="kbd">R</span>・並進 <span class="kbd">T</span> は「条件」として別入力</strong>。</li>
+            <li>潜在は「動きそのもの」に集中 → <strong>3人以上へも再学習なしで一般化</strong>。</li>
+          </ul>
+        </div>
+      </div>
+      <p>
+        式で言えば、正準化モーション <span class="kbd">M<sup>c</sup> = R·M + T</span> を作り、エンコーダで潜在 <span class="kbd">z<sup>f</sup></span> に落とす。
+        さらに人 <span class="kbd">i</span> から見た人 <span class="kbd">j</span> の<strong>相対剛体変換 <span class="kbd">[R<sup>i←j</sup>, T<sup>i←j</sup>]</span></strong> を計算して、拡散ネットへ条件として渡す。
+      </p>
+      <div class="note key">
+        <span class="label">効果（アブレーションで実証）</span>
+        再構成品質（Recon FID）が <strong>JMLS 7.783 → CLS 0.307</strong> と劇的に改善。
+        生成側でもCLSを外すとFIDが <strong>3.100 → 5.274</strong> に悪化し、正準化が成否を分けることがわかる。
+      </div>
+
+      <h2 id="m-hmc">貢献2: 階層的モーション条件（Hierarchical Motion Condition）</h2>
+      <p>
+        拡散の生成を、<strong>窓の中（ローカル）から系列全体（グローバル）</strong>へと多段階で導く。
+        ローカルは「短期の時間・空間・意味」、グローバルは「長期の一貫性」を担当する。
+        重みと条件は人 <span class="kbd">A</span>/<span class="kbd">B</span> で共有（対称）される。
+      </p>
+
+      <h3>ローカル条件（窓の内側 / 4種類）</h3>
+      <ul>
+        <li><strong>① 対象人物の履歴埋め込み</strong>：自分の過去 <span class="kbd">H</span> フレームを線形射影し、未来の潜在トークンと連結。</li>
+        <li><strong>② ステップ番号</strong>：履歴の各フレームに 1…<span class="kbd">H</span> の位置埋め込みを足し、<strong>self-attention</strong>で時間順序を理解。</li>
+        <li><strong>③ 相手の履歴埋め込み</strong>：相手 <span class="kbd">B</span> の履歴を相対変換で <span class="kbd">A</span> のローカル座標へ移し、<strong>Interaction Cross-Attention</strong>で相互作用を取り込む。</li>
+        <li><strong>④ 単語レベルのテキスト埋め込み</strong>：文を単語トークンに分割し<strong>Text Cross-Attention</strong>で注入。きめ細かな意味整合をとり、<strong>意味のドリフトを防ぐ</strong>。</li>
+      </ul>
+
+      <h3>グローバル条件（窓をまたぐ / 2種類）</h3>
+      <ul>
+        <li><strong>⑤ 系列インデックス＋総フレーム数</strong>：いま全体のどこを生成中かと全長を、<strong>AdaLN</strong>で注入。長期の位置感覚を持たせる。</li>
+        <li><strong>⑥ 合成コマンド埋め込み</strong>：系列全体のテキストを1つのグローバルトークン <span class="kbd">e</span> に符号化し、Text Cross-Attentionで全体方針として与える。</li>
+      </ul>
+      <div class="note">
+        <span class="label">直感</span>
+        ローカル条件＝「この瞬間、相手とどう噛み合うか」を細かく合わせる係。
+        グローバル条件＝「物語全体のどこにいて、最終的に何をする話か」を見失わせない係。
+        この二段構えが、長い系列でも破綻しない一貫した相互作用を生む。
+      </div>
+
+      <h2 id="train">学習と多人数への拡張</h2>
+      <p><strong>2段階学習</strong>で「符号化」と「生成」を分離する：</p>
+      <ul>
+        <li><strong>Stage I</strong>: Motion VAEを標準のVAE目的（再構成＋KL）で事前学習し、以後<strong>凍結</strong>。</li>
+        <li><strong>Stage II</strong>: 自己回帰スライディングウィンドウで拡散を学習。標準のデノイズ損失に加え、InterGen由来の相互作用正則化（関節アフィニティ <span class="kbd">L<sub>aff</sub></span>、人物間距離 <span class="kbd">L<sub>dist</sub></span>、相対向き <span class="kbd">L<sub>ori</sub></span>）を併用。</li>
+      </ul>
+      <p>
+        <strong>2人 → 多人数</strong>はとてもシンプル。正準化潜在空間と共有重み拡散はそのまま使え、
+        更新するのは<strong>「相手の履歴埋め込み」1項だけ</strong>（全員ぶんの履歴を連結して入れる）。
+        多人数データでcross-attentionを追加微調整すればさらに伸びる余地がある、と述べている。
+      </p>
+
+      <h2 id="results">実験と結果</h2>
+      <p>
+        ベンチマークは <strong>InterHuman</strong>（SMPL-H、7,779系列）と <strong>InterX</strong>（SMPL-X、13,888系列）。
+        指標は R@Top3↑（テキスト整合）、FID↓（リアルさ）、MM Dist↓（テキスト距離）、Diversity→（多様性、GTに近いほど良い）。
+        比較はオフライン（一発生成）とオンライン（自己回帰）の両系統。<span class="kbd">InterMask*</span>＝InterMaskのオンライン版、<span class="kbd">DART†</span>＝DARTの2人拡張。
+      </p>
+      <div class="table-scroll">
+        <table class="data">
+          <thead>
+            <tr><th>InterHuman</th><th>設定</th><th>R@Top3↑</th><th>FID↓</th><th>MM Dist↓</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Ground Truth</td><td class="grp">—</td><td>0.701</td><td>0.273</td><td>3.755</td></tr>
+            <tr><td>InterGen</td><td class="grp">offline</td><td>0.624</td><td>5.918</td><td>5.108</td></tr>
+            <tr><td>InterMask（従来SOTA）</td><td class="grp">offline</td><td>0.683</td><td>5.154</td><td>3.790</td></tr>
+            <tr><td>InterMask*</td><td class="grp">online</td><td>0.557</td><td>14.352</td><td>3.852</td></tr>
+            <tr><td>DART†</td><td class="grp">online</td><td>0.642</td><td>4.979</td><td>3.813</td></tr>
+            <tr class="hl"><td>HINT</td><td class="grp">online</td><td>0.672</td><td class="win">3.100</td><td>3.796</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <ul>
+        <li><strong>FIDで圧勝</strong>：InterHuman <strong>5.154 → 3.100</strong>（−2.054）、InterX <strong>0.399 → 0.278</strong>。オフラインの強豪すら上回る。</li>
+        <li>R@Top3 / MM Distはオンライン勢で最良。オフラインのInterMaskにわずかに及ばないのは、自己回帰ゆえ<strong>全体テキストへの大域最適化をしない</strong>ため（−0.011程度）。</li>
+        <li><strong>推論速度</strong>：16フレームを約 <strong>1.1秒</strong>（RTX 3090）。DART† は0.3s、InterMask* は1.1s。</li>
+        <li><strong>ユーザースタディ</strong>（15名）：意味整合59%・動きの滑らかさ58.5%・総合58.7%で、いずれも過半数の支持。</li>
+      </ul>
+
+      <h2 id="ablation">アブレーション（何が効いているか）</h2>
+      <ul>
+        <li><strong>正準化潜在空間（CLS）</strong>が最重要。外すとFID 3.100→5.274へ大幅悪化。</li>
+        <li>ローカル条件はどれも寄与。特に履歴・相対履歴・単語テキストを抜くとFIDがそれぞれ +1.497 / +1.474 / +0.195 悪化。</li>
+        <li>グローバル条件の影響はさらに大きい：系列インデックス＋総フレーム数を抜くとR@Top3 −0.005・FID +0.443、合成コマンドを抜くとFID +0.241。<strong>長期一貫性に必須</strong>。</li>
+      </ul>
+
+      <h2 id="takeaway">まとめ・所感</h2>
+      <div class="note key">
+        <span class="label">TAKEAWAY</span>
+        「動き」と「相互作用（相対変換）」を潜在空間で<strong>分離</strong>したのが効いている。
+        分離したからこそ ① 潜在が動きの本質に集中して品質が上がり、② 人数変化に再学習なしで対応でき、
+        ③ 相互作用は条件として階層的に注入できる ——という3つの利点が同時に立つ。
+      </div>
+      <ul>
+        <li><strong>強み</strong>：複数人 × 自己回帰 × 拡散の初フレームワーク。長尺・可変長・可変人数をストリーミング生成でき、FIDで明確にSOTA。</li>
+        <li><strong>弱み・限界</strong>：自己回帰なので全体テキストへの大域整合はオフライン最良手法にわずかに劣る。多人数は2人モデルの素直な拡張に留まり、専用データでの微調整余地が残る。</li>
+        <li><strong>今後</strong>：物体や環境との相互作用（human-object）への拡張を展望。</li>
+        <li><strong>自分の理解メモ</strong>：<span class="todo">ここに自分の気づきを追記</span></li>
+      </ul>
+
+    </article>
+
+    <!-- ===== 逐語訳モード ===== -->
+    <article class="mode-pane content" data-mode="translate">
+
+      <p class="tr-intro">
+        各節を <em>原文（上・小さい斜体）</em> と <b>和訳（下）</b> の対で並べています。
+        和訳中の<span class="tnote">点線の語</span>には、画面<b>右の余白に訳註</b>が出ます（注を探しに行く必要はありません）。
+        ※画面が狭いときは訳註が段落の下に畳まれます。
+      </p>
+
+      <!-- ========== Abstract ========== -->
+      <h2 id="tr-abstract"><span class="tr-sec-num">—</span>Abstract（要旨）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Text-driven multi-human motion generation with complex interactions remains a challenging problem. Despite progress in performance, existing offline methods that generate fixed-length motions with a fixed number of agents, are inherently limited in handling long or variable text, and varying agent counts. These limitations naturally encourage autoregressive formulations, which predict future motions step by step conditioned on all past trajectories and current text guidance.</p>
+          <p class="dst">複雑な相互作用を伴う、テキスト駆動の複数人モーション生成は、依然として難しい問題である。性能面では進展があるものの、固定長のモーションを固定人数で生成する既存の<span class="tnote">オフライン手法</span>は、長いテキストや可変長のテキスト、そして人数の変化を扱う上で本質的に限界がある。こうした限界は自然に、過去の全軌跡と現在のテキスト指示を条件として未来のモーションを一歩ずつ予測する<span class="tnote">自己回帰的</span>な定式化を促す。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>オフライン手法 <span class="en">offline</span></b>：系列全体を一度にまとめて生成する方式。途中から条件を変えられず、長さも人数も生成前に固定する必要がある。↔ オンライン（逐次生成）。</aside>
+          <aside class="sn"><b>自己回帰 <span class="en">autoregressive</span></b>：自分が直前までに出力した結果を入力に戻し、次を予測…を繰り返す生成方式。文章生成（次の単語予測）と同じ考え方で、長さを自由に伸ばせる。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">In this work, we introduce HINT, the first autoregressive framework for multi-human motion generation with Hierarchical INTeraction modeling in diffusion. First, HINT leverages a disentangled motion representation within a canonicalized latent space, decoupling local motion semantics from inter-person interactions. This design facilitates direct adaptation to varying numbers of human participants without requiring additional refinement.</p>
+          <p class="dst">本研究では <strong>HINT</strong> を提案する。これは、拡散モデルの中で<strong>階層的な相互作用（Hierarchical INTeraction）</strong>をモデル化する、複数人モーション生成のための初の自己回帰フレームワークである。第一に、HINT は<span class="tnote">正準化潜在空間</span>の中で<span class="tnote">分離された（disentangled）</span>モーション表現を用い、局所的な動きの意味（local motion semantics）と人物間の相互作用とを切り離す。この設計により、追加の微調整なしに、人数の変化へ直接適応できる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>正準化潜在空間 <span class="en">canonicalized latent space</span></b>：各人の動きを「自分中心のローカル座標」に揃えて（＝正準化して）から潜在ベクトルに符号化する空間。絶対位置を取り除き、動きそのものに集中させる。</aside>
+          <aside class="sn"><b>分離／もつれ解き <span class="en">disentangled</span></b>：「動きの中身」と「人どうしの位置関係」のように、本来別物の要素を潜在表現の中で混ぜず、別軸として扱うこと。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Second, HINT adopts a sliding-window strategy for efficient online generation, and aggregates local within-window and global cross-window conditions to capture past human history, inter-person dependencies, and align with text guidance. This strategy not only enables fine-grained interaction modeling within each window but also preserves long-horizon coherence across all the long sequence. Extensive experiments on public benchmarks demonstrate that HINT matches the performance of strong offline models and surpasses autoregressive baselines. Notably, on InterHuman, HINT achieves an FID of 3.100, significantly improving over the previous state-of-the-art score of 5.154.</p>
+          <p class="dst">第二に、HINT は効率的なオンライン生成のために<span class="tnote">スライディングウィンドウ</span>戦略を採用し、窓内の<strong>局所条件</strong>と窓をまたぐ<strong>大域条件</strong>を集約して、過去の人物履歴・人物間の依存関係を捉え、テキスト指示と整合させる。この戦略は、各窓内のきめ細かい相互作用のモデル化を可能にするだけでなく、長い系列全体にわたって<span class="tnote">長期的な一貫性</span>を保つ。公開ベンチマークでの広範な実験により、HINT は強力なオフラインモデルに匹敵する性能を示し、自己回帰ベースラインを上回ることが示された。特に InterHuman において、HINT は <span class="tnote">FID</span> 3.100 を達成し、従来の最高値 5.154 を大幅に改善した。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>スライディングウィンドウ <span class="en">sliding window</span></b>：一定幅の「窓」を時間軸上で少しずつずらしながら、窓ごとに処理する手法。ここでは窓ごとに次の数フレームを生成し、それを履歴に継ぎ足して窓をずらす。</aside>
+          <aside class="sn"><b>長期的一貫性 <span class="en">long-horizon coherence</span></b>：系列が長くなっても動きが破綻・反復せず、物語として筋が通っている状態。自己回帰の弱点になりやすい点。</aside>
+          <aside class="sn"><b>FID <span class="en">Fréchet Inception Distance</span></b>：生成結果と本物（GT）の特徴分布の近さを測る指標。<b>小さいほど良い</b>＝よりリアル。</aside>
+        </div>
+      </div>
+
+      <!-- ========== 1 Introduction ========== -->
+      <h2 id="tr-1"><span class="tr-sec-num">1</span>Introduction（はじめに）</h2>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">Human motion generation shows diverse applications spanning character animation, human-robot interaction, virtual reality, and content creation. Recently, text-driven approaches have received growing attention, as they allow natural language to serve as a human-friendly control for generating semantically aligned human trajectories. Beyond the single-human setting, generating realistic, diverse, and controllable interactions for multiple humans remains highly challenging.</p>
+          <p class="dst">人体モーション生成は、キャラクターアニメーション、人間–ロボット相互作用、バーチャルリアリティ、コンテンツ制作にまたがる多様な応用を持つ。近年は、自然言語を人にやさしい制御手段として使い、意味的に整合した人体軌跡を生成できることから、テキスト駆動のアプローチが注目を集めている。単一人物の設定を超えて、複数の人物に対して写実的で多様かつ制御可能な相互作用を生成することは、依然として極めて難しい。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/hint/fig1_teaser.png" alt="Figure 1: HINTによる3人モーション生成">
+        <figcaption><b>Figure 1.</b> HINTによる3人モーション生成の例。テキストを切り替えながら（挨拶 → お辞儀 → 後退 → ジャンプ）、3人の一貫した動きを自己回帰的に生成する。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Existing approaches are offline frameworks that generate motions of a fixed frame length and a fixed number of agents, as shown in Fig. 2(a). While effective for short sequences, these methods are inherently limited in handling variable-length natural language descriptions, dynamic interaction patterns, and varying agent counts. Moreover, they often fail to capture long-range dependencies across extended motion sequences, leading to incoherent or repetitive behaviors. These challenges naturally call for autoregressive formulations, as shown in Fig. 2(b), where future motions are generated step by step conditioned on both past trajectories and textual instructions. Yet, autoregressive models in this domain remain underexplored, particularly for the multi-human setting with complex interactions.</p>
+          <p class="dst">既存のアプローチは（図2(a)のように）固定フレーム長・固定人数のモーションを生成するオフラインの枠組みである。短い系列には有効だが、これらの手法は可変長の自然言語記述、動的に変化する相互作用パターン、そして人数の変化を扱う上で本質的に限界がある。さらに、長いモーション系列にわたる<span class="tnote">長距離依存</span>を捉えきれないことが多く、一貫性を欠いた、あるいは反復的な振る舞いに陥りやすい。これらの課題は自然に、（図2(b)のように）過去の軌跡とテキスト指示の両方を条件として未来のモーションを一歩ずつ生成する自己回帰的な定式化を要求する。しかし、この領域での自己回帰モデル、とりわけ複雑な相互作用を伴う複数人設定でのそれは、いまだ十分に探究されていない。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>長距離依存 <span class="en">long-range dependency</span></b>：時間的に遠く離れたフレーム同士の関係。例えば「最初に挨拶したから最後にお辞儀する」といった、離れた文脈のつながり。</aside>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/hint/fig2_comparison.png" alt="Figure 2: アーキテクチャの比較">
+        <figcaption><b>Figure 2.</b> アーキテクチャの比較。<b>(a) 従来の一発生成（single-shot）</b>：固定長を一度に出力する。<b>(b) HINT</b>：履歴＋テキストから未来を窓ごとに逐次生成し、可変長でストリーミングする。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">In this work, we propose HINT, the first autoregressive diffusion-based framework for multi-human motion generation with hierarchical interaction modeling in diffusion. HINT presents two novel contributions. First, Canonicalized Latent Space, which encodes each human's motion in its own local coordinate system, rather than encoding all agents in world coordinates. Prior approaches typically adopt such joint space, where motion dynamics are entangled with inter-agent positions, limiting scalability and requiring re-training when the number of agents changes. In contrast, HINT decouples individual motion representation from social interactions, while explicit relative transformations (rotations and translations) among agents are provided separately as conditions in diffusion. This separation enables the latent space to concentrate on motion semantics and ensures seamless adaptability to scenarios involving variable number of agents without finetuning or re-training.</p>
+          <p class="dst">本研究では、拡散モデルの中で階層的に相互作用をモデル化する、複数人モーション生成のための初の自己回帰・拡散ベース枠組み <strong>HINT</strong> を提案する。HINT には2つの新規な貢献がある。第一は<strong>正準化潜在空間</strong>であり、全エージェントを世界座標で符号化するのではなく、各人の動きをその人自身のローカル座標系で符号化する。従来手法は典型的にこのような<span class="tnote">共有空間（joint space）</span>を採用しており、動きのダイナミクスがエージェント間の位置関係と<strong>もつれ合って</strong>しまうため、スケーラビリティが制限され、人数が変わると再学習が必要になる。対照的に HINT は、個々の動き表現を社会的な相互作用から切り離し、エージェント間の明示的な<span class="tnote">相対変換（回転・並進）</span>を拡散モデルへの条件として別に与える。この分離により、潜在空間は動きの意味に集中でき、微調整や再学習なしに人数が変わるシナリオへ滑らかに適応できる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>共有空間 <span class="en">Joint Multi-Human Latent Space (JMLS)</span></b>：両者の動きに同じ座標変換をかけ、ひとつの潜在空間にまとめて詰め込む従来方式。相対位置は保てるが動きと幾何が絡む。本論文の比較対象。</aside>
+          <aside class="sn"><b>相対変換（回転R・並進T）<span class="en">rigid transformation</span></b>：「人Aから見て人Bがどの向き・どの位置にいるか」を表す剛体変換。動きとは分けて、条件として与える。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Second, we propose a sliding-window strategy for efficient online generation. Local to global temporal, spatial, and semantic cues are then aggregated to guide the diffusion process. Local conditions are collected inside each window, i.e., target human's motion history, step index, partners' motion, and word-level text guidance, capturing fine-grained social and temporal dependencies within the window and preventing semantic drift. Global conditions, including sequence index of the current window, total frame length, and compositional command text guidance, are used to locate the current window within the entire sequence and thereby enforce long-term consistency. This hierarchical design enables natural, coherent, and semantically aligned multi-human motion generation, as shown in Fig. 1.</p>
+          <p class="dst">第二に、効率的なオンライン生成のためのスライディングウィンドウ戦略を提案する。局所から大域にわたる時間的・空間的・意味的な手がかりを集約し、拡散過程を導く。<strong>局所条件</strong>は各窓の内側で集められ、すなわち対象人物の動き履歴・ステップ番号・相手の動き・単語レベルのテキスト指示からなり、窓内のきめ細かい社会的・時間的依存を捉えて<span class="tnote">意味のドリフト</span>を防ぐ。<strong>大域条件</strong>は、現在の窓の系列インデックス・総フレーム数・<span class="tnote">合成コマンド</span>のテキスト指示からなり、系列全体の中で現在の窓の位置を特定して長期的な一貫性を強制する。この階層的な設計により、図1のように自然で一貫した、意味的に整合した複数人モーション生成が可能になる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>意味のドリフト <span class="en">semantic drift</span></b>：生成を続けるうちに、最初のテキスト指示の意味から動きが少しずつずれていく現象。単語レベルの細かい整合で抑える。</aside>
+          <aside class="sn"><b>合成コマンド <span class="en">compositional command</span></b>：複数の指示が連結された、系列全体を表すテキスト全体。1つの大域トークンに符号化して全体方針として使う。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">We conduct extensive experiments on the InterHuman and InterX benchmarks. Results show that HINT not only matches the performance of strong offline methods but also outperforms existing autoregressive baselines by a large margin.</p>
+          <p class="dst">我々は InterHuman と InterX のベンチマークで広範な実験を行った。結果は、HINT が強力なオフライン手法に匹敵する性能を示すだけでなく、既存の自己回帰ベースラインを大差で上回ることを示している。</p>
+        </div>
+      </div>
+
+      <!-- ========== 2 Related Work ========== -->
+      <h2 id="tr-2"><span class="tr-sec-num">2</span>Related Work（関連研究）</h2>
+
+      <h3>Single Human Motion Generation（単一人物のモーション生成）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Recent work approaches single-person motion generation mainly with diffusion or autoregressive models. Diffusion-based methods capture complex distributions and yield high-quality sequences across modalities such as text, audio, and scene context, but are typically limited to fixed-length clips. Autoregressive models instead generate motions step by step, enabling variable-length synthesis and finer control, though they are prone to error accumulation. DART bridges these paradigms through a latent diffusion–autoregressive design that supports streaming, controllable motion generation. We build on this paradigm to extend autoregressive diffusion to multi-human interaction, explicitly modeling semantic dependencies and coordination between participants.</p>
+          <p class="dst">近年の研究は、単一人物のモーション生成を主に拡散モデルまたは自己回帰モデルで扱う。拡散ベースの手法は複雑な分布を捉え、テキスト・音声・シーン文脈といった様々なモダリティにわたって高品質な系列を生み出すが、典型的には固定長のクリップに限られる。一方で自己回帰モデルはモーションを一歩ずつ生成し、可変長の合成とより細かい制御を可能にするが、<span class="tnote">誤差の蓄積</span>に陥りやすい。<strong>DART</strong> は、潜在拡散と自己回帰を組み合わせた設計によってこれらのパラダイムを橋渡しし、ストリーミング可能で制御可能なモーション生成を支える。我々はこのパラダイムの上に立ち、自己回帰拡散を複数人の相互作用へ拡張し、参加者間の意味的依存と協調を明示的にモデル化する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>誤差の蓄積 <span class="en">error accumulation</span></b>：自己回帰では自分の出力を次の入力に使うため、わずかな誤差が後段へ繰り返し伝播して雪だるま式に増えること。</aside>
+          <aside class="sn"><b>DART</b>：潜在拡散＋自己回帰でストリーミング生成を実現した先行研究。本手法の土台。後述の比較で2人版「DART†」として登場。</aside>
+        </div>
+      </div>
+
+      <h3>Human-Human Interaction Generation（人間どうしの相互作用生成）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Recent years have witnessed increasing interest in human interaction motion generation, particularly in the areas of reaction and inter-action generation. Reaction generation aims to synthesize plausible responses conditioned on a partner's motion, with approaches ranging from Transformer-based coordination and diffusion with distance constraints to physics-driven modeling, spatio-temporal cross-attention, and reasoning with LLMs. Interaction generation instead models both humans jointly, using dual-branch diffusion, lightweight communication across pretrained models, dual-level textual prompts, LLM-based planning, or masked spatio-temporal token prediction.</p>
+          <p class="dst">近年、人間の相互作用モーション生成、とりわけ<strong>反応（reaction）生成</strong>と<strong>相互作用（interaction）生成</strong>の領域への関心が高まっている。反応生成は、相手の動きを条件としてもっともらしい応答を合成することを目指し、その手法は Transformer ベースの協調や距離制約付き拡散から、物理駆動のモデリング、時空間クロスアテンション、LLM による推論まで幅広い。一方で相互作用生成は両者を同時にモデル化し、二分岐拡散、事前学習済みモデル間の軽量な通信、二層のテキストプロンプト、LLM ベースの計画、あるいはマスク付き時空間トークン予測などを用いる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>反応生成 vs 相互作用生成</b>：前者は「相手の動きが与えられ、それへの応答を作る」片方向。後者は「2人ぶんを同時に」生成する。HINT は後者（さらに自己回帰）に当たる。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">Beyond pairwise interactions, SocialGen leverages language descriptions for group social behaviors, Multi-Person Interaction Generation scales two-person priors to larger groups, and PINO enables long-duration and customizable generation for arbitrary group sizes. Despite these advances, most methods still generate fixed-length sequences, limiting their applicability in real-time and streaming scenarios.</p>
+          <p class="dst">2者間の相互作用を超えて、SocialGen は集団の社会的振る舞いに言語記述を活用し、Multi-Person Interaction Generation は2人用の事前分布をより大きな集団へ拡張し、PINO は任意の集団規模に対して長時間かつカスタマイズ可能な生成を可能にする。これらの進展にもかかわらず、ほとんどの手法は依然として固定長の系列を生成しており、リアルタイム・ストリーミングの場面での適用性が制限されている。</p>
+        </div>
+      </div>
+
+      <!-- ========== 3 Method ========== -->
+      <h2 id="tr-3"><span class="tr-sec-num">3</span>Method（手法）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">We address text-driven online multi-human motion generation, which sequentially predicts future poses of N agents conditioned on their past motions and a textual description T. Formally, let</p>
+          <div class="eq">M<sup>1:T</sup> = { m<sup>t</sup><sub>(i)</sub> ∈ ℝ<sup>d</sup> | i = 1,…,N; t = 1,…,T } <span class="num">(1)</span></div>
+          <p class="src">denote the motion sequence of N humans over T timesteps, where m<sup>t</sup><sub>(i)</sub> is the motion representation of agent i at time t, d is the dimension of the representation. Autoregressive multi-human motion generation recursively predicts</p>
+          <div class="eq">M̂<sup>t:t+K</sup> ∼ p<sub>θ</sub>( M<sup>t:t+K</sup> | M̂<sup>1:t−1</sup>, T<sup>1:t+K</sup> ) <span class="num">(2)</span></div>
+          <p class="src">with trained parameters θ, thereby capturing both temporal dependencies across timesteps and social dependencies across humans. We jointly predict K future timesteps for efficiency. For clarity, we use h<sup>1:H</sup><sub>A</sub> to represent the H-timestep history motion of agent A and f<sup>1:K</sup><sub>A</sub> to represent the K-timestep future motion within a sliding window. We empirically set H = 4, K = 16.</p>
+          <p class="dst">我々は、テキスト駆動の<strong>オンライン</strong>複数人モーション生成に取り組む。これは、過去のモーションとテキスト記述 T を条件に、N 人のエージェントの未来の姿勢を逐次的に予測するものである。形式的には、式(1) を T ステップにわたる N 人のモーション系列とする。ここで m<sup>t</sup><sub>(i)</sub> は時刻 t におけるエージェント i のモーション表現、d はその表現の次元である。自己回帰的な複数人モーション生成は、学習済みパラメータ θ を用いて式(2) を再帰的に予測し、これによってタイムステップ間の<strong>時間的依存</strong>と人物間の<strong>社会的依存</strong>の両方を捉える。効率のため、K ステップぶんの未来を同時に予測する。記法の明確化のため、h<sup>1:H</sup><sub>A</sub> をエージェント A の H ステップの履歴モーション、f<sup>1:K</sup><sub>A</sub> をスライディングウィンドウ内の K ステップの未来モーションとする。経験的に H = 4, K = 16 と設定する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>記号の読み方</b>：M̂ の「^（ハット）」は予測値。下付き (i) は人物番号、上付き 1:T は「1〜T フレーム」を表す範囲。p<sub>θ</sub> はパラメータ θ を持つ確率モデル（拡散）。</aside>
+          <aside class="sn"><b>H=4, K=16</b>：履歴として直近4フレームを見て、未来16フレームをまとめて生成する、という窓の設定。</aside>
+        </div>
+      </div>
+
+      <h3>3.1 Overview of HINT（全体像）</h3>
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">Fig. 3 demonstrates the two-human motion generation pipeline of HINT, which employs a sliding-window strategy to autoregressively extend future segments with a diffusion model (see Fig. 2). We show that HINT naturally generalizes to multi-human settings in Sec. 3.5.</p>
+          <p class="dst">図3 は HINT の2人モーション生成パイプラインを示す。これはスライディングウィンドウ戦略を用い、拡散モデルで未来のセグメントを自己回帰的に延長する（図2参照）。HINT が複数人設定へ自然に一般化できることは 3.5 節で示す。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/hint/fig3_pipeline.png" alt="Figure 3 (a)(b): Motion VAEと自己回帰生成">
+        <figcaption><b>Figure 3 (a)(b).</b> <b>(a) Motion VAE</b>：各人を正準化（Canonicalize）して潜在 z<sup>f</sup> に符号化し、デコーダ D で復元する（学習後は凍結）。<b>(b) 自己回帰生成</b>：Interaction-Aware Diffusion が次の K フレームの潜在を生成し、デコードして履歴に継ぎ足しながら窓をずらす。（凡例：ⓒ=連結、⊕=加算、^=予測値、~=ノイズ付与、L/G=局所/大域条件）</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Motion VAE.</b> In Fig. 3(a), we first construct a canonicalized shared latent space to map raw motion sequences into latent representations. Concretely, the motion of each individual, m_A, m_B ∈ ℝ<sup>T×d</sup>, with T timesteps and d dimensions, is divided into overlapping windows and canonicalized in its local coordinate to remove absolute position. A transformer-based Motion VAE, following DART, is then employed for sliding-window modeling. The VAE consists of an encoder E and a decoder D. Given a window with H history h<sup>1:H</sup><sub>(i)</sub> and K future frames f<sup>1:K</sup><sub>(i)</sub> for human i ∈ {A,B}, E conditions on the history and encodes the future into a latent vector z<sup>f</sup><sub>(i)</sub> ∈ ℝ<sup>l</sup> in the shared latent space. D reconstructs the K future frames from z<sup>f</sup><sub>(i)</sub>, conditioned on the corresponding history. Once trained, both encoder E and decoder D are frozen in subsequent modules, ensuring that the latent space remains stable and consistent.</p>
+          <p class="dst"><b>Motion VAE。</b> 図3(a) では、まず生のモーション系列を潜在表現へ写すための正準化された共有潜在空間を構築する。具体的には、各個人の動き m_A, m_B ∈ ℝ<sup>T×d</sup>（T ステップ・d 次元）を重なり合う窓に分割し、絶対位置を取り除くために各自のローカル座標で正準化する。次に、DART にならった Transformer ベースの <span class="tnote">Motion VAE</span> をスライディングウィンドウのモデル化に用いる。VAE はエンコーダ E とデコーダ D からなる。人 i ∈ {A,B} の、H フレームの履歴 h<sup>1:H</sup><sub>(i)</sub> と K フレームの未来 f<sup>1:K</sup><sub>(i)</sub> をもつ窓が与えられると、E は履歴を条件として未来を共有潜在空間内の潜在ベクトル z<sup>f</sup><sub>(i)</sub> ∈ ℝ<sup>l</sup> に符号化する。D は対応する履歴を条件として、z<sup>f</sup><sub>(i)</sub> から K フレームの未来を復元する。一度学習されると、エンコーダ E とデコーダ D は以降のモジュールでは<span class="tnote">凍結</span>され、潜在空間が安定かつ一貫に保たれる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>VAE <span class="en">Variational Auto-Encoder</span></b>：データを確率的な潜在ベクトルに圧縮（エンコード）し、そこから復元（デコード）する生成モデル。ここでは「動き」を潜在 z に圧縮する役割。</aside>
+          <aside class="sn"><b>凍結 <span class="en">frozen</span></b>：学習済みの重みを固定し、以降の学習で更新しないこと。潜在空間を安定させ、拡散側の学習を一貫させる狙い。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Sliding-Window Strategy for Autoregressive Generation.</b> As illustrated in Fig. 3(b), HINT employs a sliding-window autoregressive process for both training and generation. During training, the ground-truth motion sequence is divided into overlapping windows. Future frames in each window are encoded into a latent z<sup>f</sup><sub>(i)</sub>, i ∈ {A,B} by the motion encoder E, where noise is added to obtain z̃<sup>f</sup><sub>(i)</sub>. Conditioned on z̃<sup>f</sup><sub>(i)</sub>, historical motion h<sup>f</sup><sub>(i)</sub>, and text T, the Interaction-Aware Diffusion model learns to predict the denoised latent ẑ<sup>f</sup><sub>(i)</sub>. During inference, we sample a future latent ẑ<sup>f</sup><sub>(i)</sub> conditioned on the history and text. Then the frozen decoder D reconstructs the future K frames f̂<sup>1:K</sup><sub>(i)</sub> from ẑ<sup>f</sup><sub>(i)</sub>. f̂<sup>1:K</sup><sub>(i)</sub> is appended to the history to condition the next window, proceeding autoregressively.</p>
+          <p class="dst"><b>自己回帰生成のためのスライディングウィンドウ戦略。</b> 図3(b) に示すように、HINT は学習と生成の両方でスライディングウィンドウの自己回帰過程を用いる。学習時には、正解（GT）のモーション系列を重なり合う窓に分割する。各窓の未来フレームは、モーションエンコーダ E によって潜在 z<sup>f</sup><sub>(i)</sub>（i ∈ {A,B}）に符号化され、そこへ<span class="tnote">ノイズ</span>を加えて z̃<sup>f</sup><sub>(i)</sub> を得る。この z̃<sup>f</sup><sub>(i)</sub>・履歴モーション h<sup>f</sup><sub>(i)</sub>・テキスト T を条件として、Interaction-Aware Diffusion モデルは<span class="tnote">ノイズ除去後</span>の潜在 ẑ<sup>f</sup><sub>(i)</sub> を予測するよう学習する。推論時には、履歴とテキストを条件に未来潜在 ẑ<sup>f</sup><sub>(i)</sub> をサンプリングする。次いで凍結されたデコーダ D が ẑ<sup>f</sup><sub>(i)</sub> から未来 K フレーム f̂<sup>1:K</sup><sub>(i)</sub> を復元する。f̂<sup>1:K</sup><sub>(i)</sub> を履歴に継ぎ足して次の窓の条件とし、自己回帰的に進めていく。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>拡散モデルの学習と推論 <span class="en">diffusion</span></b>：学習＝正解の潜在にノイズを足し、それを「取り除く」訓練。推論＝ノイズから出発し、条件に沿って徐々にノイズを除いて潜在を生成する。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Interaction-Aware Diffusion.</b> Fig. 3(c) illustrates the Interaction-Aware Diffusion module, exemplified with two-human interaction generation. The model employs shared weights and shared conditioning signals for both agents A and B, ensuring that the same model parameters are applied symmetrically across the two. Taking the motion generation of human A as an example, the model is first conditioned on the historical motion sequences of both human A and human B, denoted as h<sup>1:H</sup><sub>A</sub> and h<sup>1:H</sup><sub>B</sub>, respectively. Then the relative rotation R<sup>A←B</sup> and translation T<sup>A←B</sup> are encoded and integrated. Additionally, the module integrates a set of hierarchical conditions: 1) step index within the current temporal window; 2) word-level text embedding; 3) sequence index of the current window in the overall sequence, total frame length T_N to be generated according to the textual description; and 4) compositional command embedding.</p>
+          <p class="dst"><b>Interaction-Aware Diffusion（相互作用を意識した拡散）。</b> 図3(c) は、2人相互作用生成を例に Interaction-Aware Diffusion モジュールを図示する。このモデルはエージェント A・B の両方に<span class="tnote">重みと条件信号を共有</span>させ、同じモデルパラメータが2人に対称的に適用されることを保証する。人 A のモーション生成を例にとると、モデルはまず人 A・人 B 双方の履歴モーション系列（それぞれ h<sup>1:H</sup><sub>A</sub>, h<sup>1:H</sup><sub>B</sub>）を条件とする。次に相対回転 R<sup>A←B</sup> と並進 T<sup>A←B</sup> が符号化・統合される。さらにモジュールは階層的な条件の集合を統合する：1) 現在の時間窓内のステップ番号、2) 単語レベルのテキスト埋め込み、3) 系列全体における現在の窓の系列インデックスと、テキスト記述に従って生成すべき総フレーム数 T_N、4) 合成コマンド埋め込み。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>重み・条件の共有（対称）</b>：人Aを生成するネットと人Bを生成するネットを別々に持たず、同一のネットワークをA/B入れ替えて使う。これにより人数が増えても破綻しにくい。</aside>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/hint/fig3c_diffusion.png" alt="Figure 3 (c): Interaction-Aware Diffusion">
+        <figcaption><b>Figure 3 (c).</b> Interaction-Aware Diffusion モジュール（人 A の視点）。<b>局所条件</b>：(1) 対象人物の履歴埋め込み、(2) ステップ番号、(3) 相手の履歴＋相対変換 R<sup>A←B</sup>,T<sup>A←B</sup>、(4) 単語レベルのテキスト埋め込み。<b>大域条件</b>：(5) 総フレーム数 T<sub>N</sub>・系列インデックス t、(6) 合成コマンド埋め込み。これらが Self-attention / Interaction Cross-Attention / Text Cross-Attention / AdaLN を通じて N ブロックに注入され、次の潜在 ẑ<sup>f</sup> を生成する。本文 3.3 節の (c-1)〜(c-6) は図中の (1)〜(6) に対応する。</figcaption>
+      </figure>
+
+      <h3>3.2 Canonicalized Latent Space（正準化潜在空間）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">We propose a Canonicalized Latent Space, as illustrated in Fig. 3(a), which encodes explicit motion sequences into compact latents. Existing methods on human-human interaction generation often adopt a Joint Multi-Human Latent Space by applying the same coordinate transformation to both agents' motions, which preserves relative position but entangles motion semantics with inter-person geometry, hindering generalization to multi-human scenarios. Instead, we perform independent canonicalization and normalization for each agent A, B, transforming motions to their respective local coordinate, while explicitly encoding relative transformations (rotation R<sup>A←B</sup> and translation T<sup>A←B</sup>) as conditions for the generative model. Specifically, after canonicalization, each individual is oriented toward the positive z-axis, with the root joint positioned at the origin.</p>
+          <p class="dst">図3(a) に示す<strong>正準化潜在空間</strong>を提案する。これは明示的なモーション系列をコンパクトな潜在へ符号化する。人間どうしの相互作用生成における既存手法は、しばしば両エージェントの動きに同じ座標変換を適用する<span class="tnote">共有多人数潜在空間（JMLS）</span>を採用するが、これは相対位置を保つ一方で動きの意味を人物間の幾何ともつれさせ、複数人シナリオへの一般化を妨げる。代わりに我々は、各エージェント A, B に対して独立に正準化と正規化を行い、動きをそれぞれのローカル座標へ変換しつつ、相対変換（回転 R<sup>A←B</sup> と並進 T<sup>A←B</sup>）を生成モデルの条件として明示的に符号化する。具体的には、正準化の後、各個人は<span class="tnote">+z 軸の向きにそろえられ、ルート関節が原点</span>に置かれる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>JMLS <span class="en">Joint Multi-Human Latent Space</span></b>：従来の「共有座標」方式。本手法（CLS）の主要な比較対象で、表3で再構成品質が大きく劣る（Recon FID 7.783 vs 0.307）ことが示される。</aside>
+          <aside class="sn"><b>+z 軸／ルート関節を原点</b>：各人を「正面が+z方向・腰（ルート）が原点」に毎回そろえること（＝正準化）。これで世界座標上のどこにいるか・どちら向きかという絶対情報を消す。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Formally, given a motion sequence M<sub>(i)</sub> for human i ∈ {A,B}, the canonicalized motion is defined as M<sup>c</sup><sub>(i)</sub> = R<sub>(i)</sub>M<sub>(i)</sub> + T<sub>(i)</sub>, where R<sub>(i)</sub> and T<sub>(i)</sub> denote the rotation and the translation, respectively. Following the reparameterization strategy, the latent representation z<sup>f</sup><sub>(i)</sub> is obtained via the encoder E as</p>
+          <div class="eq">z<sup>f</sup><sub>(i)</sub> ∼ q<sub>φ</sub>( z<sup>f</sup><sub>(i)</sub> | M<sup>c</sup><sub>(i)</sub> ), <span class="num">(3)</span></div>
+          <p class="src">where q<sub>φ</sub> is a Gaussian inference network. Training objectives are described in Sec. 3.4. To inject relative positional information, we compute the relative rigid transformation as follows,</p>
+          <div class="eq">R<sup>i←j</sup> = R<sub>(i)</sub>R<sub>(j)</sub><sup>⊤</sup>,  T<sup>i←j</sup> = T<sub>(i)</sub> − R<sup>i←j</sup>T<sub>(j)</sub>. <span class="num">(4)</span></div>
+          <p class="src">This transformation [R<sup>i←j</sup>, T<sup>i←j</sup>] is encoded into the diffusion network as a condition term.</p>
+          <p class="dst">形式的には、人 i ∈ {A,B} のモーション系列 M<sub>(i)</sub> が与えられたとき、正準化モーションを M<sup>c</sup><sub>(i)</sub> = R<sub>(i)</sub>M<sub>(i)</sub> + T<sub>(i)</sub> と定義する。ここで R<sub>(i)</sub>, T<sub>(i)</sub> はそれぞれ回転と並進である。<span class="tnote">再パラメータ化</span>の戦略にならい、潜在表現 z<sup>f</sup><sub>(i)</sub> はエンコーダ E を通じて式(3) のように得られる。ここで q<sub>φ</sub> はガウス推論ネットワークである。学習目的は 3.4 節で述べる。相対的な位置情報を注入するため、相対剛体変換を式(4) のように計算する。この変換 [R<sup>i←j</sup>, T<sup>i←j</sup>] が、条件項として拡散ネットワークに符号化される。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>再パラメータ化 <span class="en">reparameterization trick</span></b>：VAE で潜在を確率的にサンプリングしつつ、勾配を流して学習できるようにする標準テクニック（Kingma &amp; Welling, 2013）。</aside>
+          <aside class="sn"><b>式(4) の意味</b>：R<sup>i←j</sup> は「人jの向き」を「人iから見た向き」へ直す相対回転、T<sup>i←j</sup> は同様に相対並進。⊤ は転置（回転行列の逆＝転置）。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Canonicalized Latent Space vs. Joint Multi-Human Latent Space.</b> Our canonicalized latent space has two advantages over previous joint multi-human latent space. First, it effectively disentangles absolute position information from motion dynamics, forcing the latent to focus on the movement patterns themselves without being biased by spatial location. Second, such design enforces cross-human consistency in the latent space, thereby facilitating robust generalization to interactions involving three or more humans.</p>
+          <p class="dst"><b>正準化潜在空間 vs. 共有多人数潜在空間。</b> 我々の正準化潜在空間は、従来の共有多人数潜在空間に対して2つの利点を持つ。第一に、絶対位置の情報を動きのダイナミクスから効果的に分離し、潜在を空間的な位置に偏らされることなく動きのパターンそのものに集中させる。第二に、この設計は潜在空間における人物間の一貫性を強制し、3人以上が関わる相互作用への頑健な一般化を促す。</p>
+        </div>
+      </div>
+
+      <h3>3.3 Hierarchical Motion Condition（階層的モーション条件）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">To enable effective autoregressive motion generation, we incorporate local-to-global guidance into the diffusion process. Built upon a latent diffusion backbone, our Hierarchical Motion Condition (HMC) strategy organizes temporal, spatial, and semantic cues into multi-level conditions. We provide local conditions, which capture short-term dependencies and fine-grained semantic alignment within the current window, and global conditions, which enforce long-term consistency across the sequence described by the text guidance. We demonstrate HMC on human-human interaction generation (Fig. 3(c)), illustrating the procedure from human A's perspective, as weights and conditions are shared across both humans.</p>
+          <p class="dst">効果的な自己回帰モーション生成を可能にするため、局所から大域への誘導を拡散過程に組み込む。潜在拡散のバックボーンの上に構築された我々の<strong>階層的モーション条件（HMC）</strong>戦略は、時間的・空間的・意味的な手がかりを多段階の条件へ整理する。短期の依存と窓内のきめ細かい意味整合を捉える<strong>局所条件</strong>と、テキスト指示が記述する系列全体にわたる長期一貫性を強制する<strong>大域条件</strong>を与える。HMC は人間どうしの相互作用生成（図3(c)）で示し、重みと条件が両者で共有されるため、人 A の視点から手続きを説明する。</p>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Local Conditions.</b> Within each window, we employ four types of local conditions as follows. <i>1) Target Human History Embedding.</i> As shown in Fig. 3(c-1), the history motion of human A, h<sup>1:H</sup><sub>A</sub>, is first mapped into a feature representation z<sup>h</sup><sub>A</sub> via a linear projection. z<sup>h</sup><sub>A</sub> is then concatenated with the future motion token z<sup>f</sup><sub>A</sub> to form the motion feature z<sub>A</sub>.</p>
+          <p class="dst"><b>局所条件。</b> 各窓内で、次の4種類の局所条件を用いる。<i>1) 対象人物の履歴埋め込み。</i> 図3(c-1) のように、人 A の履歴モーション h<sup>1:H</sup><sub>A</sub> を、まず<span class="tnote">線形射影</span>によって特徴表現 z<sup>h</sup><sub>A</sub> に写す。次に z<sup>h</sup><sub>A</sub> を未来モーショントークン z<sup>f</sup><sub>A</sub> と連結し、モーション特徴 z<sub>A</sub> を作る。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>線形射影 <span class="en">linear projection</span></b>：1枚の全結合層（行列をかける操作）で、入力を別の次元の特徴ベクトルへ変換すること。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><i>2) Step Index.</i> Both human A and B provide H history frames. Each history frame is indexed by its timestep from 1 to H, and the index is encoded into an embedding e_s (Fig. 3(c-2)). Adding this to the motion feature z<sub>A</sub> yields z<sup>step</sup><sub>A</sub> = z<sub>A</sub> + e_s, which is then processed via self-attention to capture temporal dependencies:</p>
+          <div class="eq">z<sup>self</sup><sub>A</sub> = SelfAttn( z<sup>step</sup><sub>A</sub>, z<sup>step</sup><sub>A</sub>, z<sup>step</sup><sub>A</sub> ). <span class="num">(5)</span></div>
+          <p class="src">This enables the model to reason about temporal ordering within the prediction window.</p>
+          <p class="dst"><i>2) ステップ番号。</i> 人 A・B はともに H フレームの履歴を与える。各履歴フレームには 1 から H までのタイムステップで番号が振られ、その番号は埋め込み e_s に符号化される（図3(c-2)）。これをモーション特徴 z<sub>A</sub> に加えると z<sup>step</sup><sub>A</sub> = z<sub>A</sub> + e_s が得られ、これを<span class="tnote">self-attention</span>で処理して時間的依存を捉える（式(5)）。これにより、予測窓内での時間順序についてモデルが推論できるようになる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>self-attention（自己注意）</b>：系列内の各要素が「系列内の他の要素」を参照し合って関係を測る Transformer の機構。SelfAttn(Q,K,V) の3引数が同じ＝自分自身の系列内で注意。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><i>3) Partner History Embedding.</i> To model interactions, human B's history h<sup>1:H</sup><sub>B</sub> is transformed into human A's local coordinate via relative rotation R<sup>A←B</sup> and translation T<sup>A←B</sup> (Fig. 3(c-3)):</p>
+          <div class="eq">h<sup>1:H</sup><sub>B→A</sub> = R<sup>A←B</sup> h<sup>1:H</sup><sub>B</sub> + T<sup>A←B</sup>. <span class="num">(6)</span></div>
+          <p class="src">This is integrated into the diffusion model through Interaction Cross-Attention:</p>
+          <div class="eq">z<sup>part</sup><sub>A</sub> = CrossAttn( z<sup>self</sup><sub>A</sub>, h<sup>1:H</sup><sub>B→A</sub>, h<sup>1:H</sup><sub>B→A</sub> ). <span class="num">(7)</span></div>
+          <p class="dst"><i>3) 相手の履歴埋め込み。</i> 相互作用をモデル化するため、人 B の履歴 h<sup>1:H</sup><sub>B</sub> を、相対回転 R<sup>A←B</sup> と並進 T<sup>A←B</sup> によって人 A のローカル座標へ変換する（図3(c-3)、式(6)）。これは <span class="tnote">Interaction Cross-Attention</span> を通じて拡散モデルに統合される（式(7)）。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>cross-attention（交差注意）</b>：「自分の特徴(Q)」が「別系統の情報(K,V)」を参照する機構。ここでは自分の動き(z<sup>self</sup><sub>A</sub>)が、Aの座標系に移した相手Bの履歴を参照することで相互作用を取り込む。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><i>4) Word-Level Text Embedding.</i> Finally, we introduce word-level text embedding to impose fine-grained semantic constraints within each window, as depicted in Fig. 3(c-4). Since a single sentence may be very long or contain complex commands, we split it into words, each serving as a token, E_word = [e_1, …, e_L], where e_l denotes the embedding of the l-th token, and integrated into latent features via Text Cross-attention:</p>
+          <div class="eq">z<sup>word</sup><sub>A</sub> = CrossAttn( z<sup>part</sup><sub>A</sub>, E_word, E_word ). <span class="num"></span></div>
+          <p class="src">By jointly leveraging individual history, step index, partner history, and token-level text embedding, the model captures fine-grained interaction patterns and achieves precise text–motion alignment within each window, thereby alleviating semantic drift in long-sequence generation.</p>
+          <p class="dst"><i>4) 単語レベルのテキスト埋め込み。</i> 最後に、各窓内できめ細かい意味的制約を課すため、単語レベルのテキスト埋め込みを導入する（図3(c-4)）。1つの文は非常に長かったり複雑なコマンドを含んだりしうるため、文を単語に分割し、各単語をトークンとする E_word = [e_1, …, e_L]（e_l は l 番目のトークンの埋め込み）として、Text Cross-attention を通じて潜在特徴に統合する（式(8) 上段）。個々の履歴・ステップ番号・相手の履歴・トークンレベルのテキスト埋め込みを同時に活用することで、モデルはきめ細かい相互作用パターンを捉え、各窓内で正確なテキスト–モーション整合を達成し、長系列生成における意味のドリフトを緩和する。</p>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Global Conditions.</b> Across all windows, we collect the following two types of global information. <i>1) Sequence Index and Total Frame Number.</i> In Fig. 3(c-5), we first incorporate both the global sequence index t and the total number of frames T_N of the corresponding text segment, which indicate the position of the current window within the entire motion sequence and the overall sequence length, respectively. This information is then injected into the diffusion network through Adaptive Layer Normalization (AdaLN), ensuring that the generation process is aware of both the frame-level position and the global temporal context.</p>
+          <p class="dst"><b>大域条件。</b> 全ての窓にわたって、次の2種類の大域情報を集める。<i>1) 系列インデックスと総フレーム数。</i> 図3(c-5) では、まず大域的な系列インデックス t と、対応するテキストセグメントの総フレーム数 T_N の両方を取り込む。これらはそれぞれ、モーション系列全体における現在の窓の位置と、系列全体の長さを示す。この情報は次に <span class="tnote">Adaptive Layer Normalization (AdaLN)</span> を通じて拡散ネットワークに注入され、生成過程がフレーム単位の位置と大域的な時間文脈の両方を認識できるようにする。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>AdaLN <span class="en">Adaptive Layer Normalization</span></b>：条件（ここでは位置や総フレーム数）に応じて正規化のスケール・シフトを動的に変える注入法。DiT などで広く使われる条件付け（Peebles &amp; Xie, 2023）。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><i>2) Compositional Command Embedding.</i> If the user provides a textual description for the entire sequence, where the description consists of multiple interconnected commands that drive the human body to achieve one or more specific goals, we encode the whole text T into a single global token e to serve as guidance for the sequence generation, as depicted in Fig. 3(c-6). Then e is injected into the model through Text Cross-Attention to provide global semantic guidance across windows:</p>
+          <div class="eq">z<sup>com</sup><sub>A</sub> = CrossAttn( z<sup>part</sup><sub>A</sub>, e, e ). <span class="num">(8)</span></div>
+          <p class="src">Conceptually, word-level embeddings E_word = [e_1, …, e_L] serve as local conditions while compositional command embedding e functions as the global condition. In practice, however, both are concatenated and jointly fed into the same Text Cross-Attention block, allowing simultaneous modeling of fine-grained semantics and holistic context within a unified interaction.</p>
+          <p class="dst"><i>2) 合成コマンド埋め込み。</i> ユーザーが系列全体に対するテキスト記述を与える場合（その記述が、人体に1つ以上の特定目標を達成させる、互いに連結した複数のコマンドからなるとき）、テキスト全体 T を単一の大域トークン e に符号化し、系列生成の指針とする（図3(c-6)）。次に e を Text Cross-Attention を通じてモデルに注入し、窓をまたぐ大域的な意味誘導を与える（式(8)）。概念的には、単語レベルの埋め込み E_word = [e_1, …, e_L] が局所条件として、合成コマンド埋め込み e が大域条件として機能する。ただし実際には両者を連結し、同じ Text Cross-Attention ブロックに同時に入力することで、きめ細かい意味と全体的な文脈を統一された相互作用の中で同時にモデル化する。</p>
+        </div>
+      </div>
+
+      <h3>3.4 Training Strategy（学習戦略）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">We adopt a two-stage training strategy that decouples motion encoding and generation. <b>Stage I: Motion VAE Pretraining.</b> The Motion VAE is pretrained to obtain stable latent representations by optimizing the standard VAE objective:</p>
+          <div class="eq">ℒ<sub>VAE</sub> = Σ<sub>i</sub> ℒ<sub>rec</sub>( M̂<sub>(i)</sub>, M<sub>(i)</sub> ) + β ℒ<sub>KL</sub>( q<sub>φ</sub>(z<sup>f</sup><sub>(i)</sub> | M<sup>c</sup><sub>(i)</sub>) ‖ p(z<sup>f</sup><sub>(i)</sub>) ), <span class="num">(9)</span></div>
+          <p class="src">where ℒ<sub>rec</sub> reconstructs future frames, ℒ<sub>KL</sub> regularizes the latent distribution with KL divergence, β is a balancing factor, and p(z<sup>f</sup><sub>(i)</sub>) denotes the standard Gaussian prior. After pretraining, the encoder and decoder are frozen in generation.</p>
+          <p class="dst">我々は、モーションの符号化と生成を切り離す2段階の学習戦略を採用する。<b>Stage I：Motion VAE の事前学習。</b> Motion VAE は、標準的な VAE 目的（式(9)）を最適化して安定した潜在表現を得るために事前学習される。ここで ℒ<sub>rec</sub> は未来フレームを再構成する項、ℒ<sub>KL</sub> は潜在分布を <span class="tnote">KL ダイバージェンス</span>で正則化する項、β はバランス係数、p(z<sup>f</sup><sub>(i)</sub>) は標準ガウス事前分布である。事前学習の後、エンコーダとデコーダは生成時には凍結される。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>KLダイバージェンス <span class="en">KL divergence</span></b>：2つの確率分布の隔たりを測る量。VAEでは潜在分布を標準ガウス分布に近づける「正則化」に使う。β はその強さの重み。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Stage II: Diffusion with Autoregressive Sliding Window.</b> We train the Interaction-Aware Diffusion model using an autoregressive sliding-window strategy. At each window, the diffusion model is optimized with the standard denoising loss ℒ<sub>diff</sub>, augmented by interaction-specific regularizers inspired by InterGen, including joint affinity ℒ<sub>aff</sub>, cross-person distance constraint ℒ<sub>dist</sub>, and relative orientation ℒ<sub>ori</sub>:</p>
+          <div class="eq">ℒ = ℒ<sub>diff</sub> + λ<sub>aff</sub>ℒ<sub>aff</sub> + λ<sub>dist</sub>ℒ<sub>dist</sub> + λ<sub>ori</sub>ℒ<sub>ori</sub>, <span class="num">(10)</span></div>
+          <p class="src">where λ_* indicates balancing weights. Please refer to Appendix B.2 for details of each loss term.</p>
+          <p class="dst"><b>Stage II：自己回帰スライディングウィンドウによる拡散。</b> Interaction-Aware Diffusion モデルを、自己回帰スライディングウィンドウ戦略で学習する。各窓において、拡散モデルは標準の<span class="tnote">デノイズ損失</span> ℒ<sub>diff</sub> を、InterGen に着想を得た相互作用固有の正則化項——関節アフィニティ ℒ<sub>aff</sub>、人物間の距離制約 ℒ<sub>dist</sub>、相対向き ℒ<sub>ori</sub>——で補強して最適化する（式(10)）。ここで λ_* はバランス重みである。各損失項の詳細は付録 B.2 を参照。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>デノイズ損失 <span class="en">denoising loss</span></b>：拡散モデルの中心的な損失。加えたノイズ（または元の潜在）をどれだけ正しく当てられたかを測る。</aside>
+          <aside class="sn"><b>相互作用の正則化（aff/dist/ori）</b>：InterGen 由来。関節どうしの近さ・人物間距離・相対的な体の向きを物理的に妥当に保つための補助項。</aside>
+        </div>
+      </div>
+
+      <h3>3.5 From Two-Human to Multi-Human Motion Generation（2人から多人数へ）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Built upon the Canonicalized Latent Space (Sec. 3.2) and the shared-weight Interaction-Aware Diffusion model (Fig. 3(c)), HINT naturally generalizes to multi-human interaction scenarios. The proposed space can be directly applied to multi-human motion generation without additional training, since it decouples individual motion with social interactions. For the diffusion model, we only update one condition term: partner history embedding (Sec. 3.3 Local Conditions) by directly concatenating all partners motion history and feeding them into the diffusion. We do not perform any fine-tuning when scaling to more humans. Here, we only provide the most straightforward extension from two-person to multi-person motion generation. If additional multi-person motion datasets are employed, fine-tuning the cross-attention module is expected to yield further performance improvements.</p>
+          <p class="dst">正準化潜在空間（3.2節）と重み共有の Interaction-Aware Diffusion モデル（図3(c)）の上に構築されることで、HINT は複数人の相互作用シナリオへ自然に一般化する。提案した空間は、個々の動きを社会的相互作用から切り離しているため、追加学習なしに複数人モーション生成へ直接適用できる。拡散モデルについては、ただ1つの条件項——相手の履歴埋め込み（3.3節「局所条件」）——のみを更新する。すなわち、全ての相手の動き履歴を直接連結して拡散へ入力する。人数を増やす際に微調整は一切行わない。ここで示すのは、2人から多人数への最も素直な拡張に過ぎない。もし追加の多人数モーションデータセットを用いれば、cross-attention モジュールを微調整することでさらなる性能向上が期待される。</p>
+        </div>
+      </div>
+
+      <!-- ========== 4 Experiments ========== -->
+      <h2 id="tr-4"><span class="tr-sec-num">4</span>Experiments（実験）</h2>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Datasets.</b> We evaluate HINT on InterHuman and InterX. InterHuman comprises 7,779 motion sequences paired with 23,337 unique textual annotations containing 5,656 distinct words, and we adopt a representation similar to InterGen, where each frame is expressed as x<sup>i</sup> = [j<sup>p</sup><sub>i</sub>, j<sup>v</sup><sub>i</sub>, c<sup>f</sup>]. It is built upon the SMPL-H body model. Here, j<sup>p</sup> ∈ ℝ<sup>3N_j</sup> and j<sup>v</sup> ∈ ℝ<sup>3N_j</sup> represent the joint positions and velocities in the normalized local frame, j<sup>r</sup> ∈ ℝ<sup>6(N_j−1)</sup> denotes the 6D rotation of each joint, c<sup>f</sup> ∈ ℝ<sup>4</sup> is a binary foot-ground contact feature, and N_j denotes the number of joints, set to 22 for InterHuman. InterX is based on the SMPL-X body model and contains 13,888 motion sequences with 34,164 fine-grained textual descriptions. For InterX, N_j is set to 55.</p>
+          <p class="dst"><b>データセット。</b> HINT を InterHuman と InterX で評価する。<span class="tnote">InterHuman</span> は 7,779 のモーション系列を、5,656 の異なる単語を含む 23,337 のユニークなテキスト注釈と対にしたものである。各フレームを x<sup>i</sup> = [j<sup>p</sup><sub>i</sub>, j<sup>v</sup><sub>i</sub>, c<sup>f</sup>] と表す、InterGen に類似した表現を採用する。これは <span class="tnote">SMPL-H</span> 人体モデルに基づく。ここで j<sup>p</sup>, j<sup>v</sup> は正規化ローカル系での関節位置と速度、j<sup>r</sup> は各関節の <span class="tnote">6D 回転</span>、c<sup>f</sup> は足–地面の接触を表す二値特徴、N_j は関節数で InterHuman では 22 に設定する。<span class="tnote">InterX</span> は SMPL-X 人体モデルに基づき、13,888 のモーション系列と 34,164 のきめ細かいテキスト記述を含む。InterX では N_j を 55 とする。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>InterHuman / InterX</b>：いずれも2人の相互作用モーション＋テキストの公開ベンチマーク。InterX の方が関節数が多く（55 vs 22）、より細かい注釈を持つ。</aside>
+          <aside class="sn"><b>SMPL-H / SMPL-X</b>：標準的な3D人体パラメトリックモデル。-H は手、-X は手＋顔まで含む拡張版。</aside>
+          <aside class="sn"><b>6D 回転 <span class="en">6D rotation</span></b>：回転を学習に向いた連続的な6次元表現で持つ方式（Zhou et al., 2019）。オイラー角やクォータニオンより最適化が安定。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Baselines.</b> Offline baselines: T2M, MDM, ComMDM, InterGen, MoMat-MoGen, in2IN, and InterMask on InterHuman, and with T2M, MDM, ComMDM, InterGen, and InterMask on InterX. In addition, we introduce two extended baselines: InterMask*, which denotes our online adaptation of InterMask, and DART†, which denotes our extension of DART from single-human to two-human scenarios (see Appendix B.3 for details).</p>
+          <p class="dst"><b>ベースライン。</b> オフラインのベースラインは、InterHuman では T2M, MDM, ComMDM, InterGen, MoMat-MoGen, in2IN, InterMask、InterX では T2M, MDM, ComMDM, InterGen, InterMask である。さらに2つの拡張ベースラインを導入する：<span class="tnote">InterMask*</span>（InterMask を我々がオンライン化したもの）と <span class="tnote">DART†</span>（DART を単一人物から2人シナリオへ拡張したもの）である（詳細は付録 B.3）。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>InterMask*（アスタリスク）</b>：従来SOTAだったオフライン手法 InterMask を、公平比較のため著者らがオンライン（逐次）化した版。</aside>
+          <aside class="sn"><b>DART†（ダガー）</b>：単一人物向けの DART を著者らが2人向けに拡張した版。自己回帰ベースラインの主要比較対象。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Evaluation Metrics.</b> R-Precision (reported as R@Top3) and Multimodal Distance (MM Dist) are used to evaluate text-motion consistency. Specifically, R-Precision measures the rank of the Euclidean distance between motion and text embeddings, while MM Dist computes the average Euclidean distance between each generated motion and its corresponding text. Fréchet Inception Distance (FID) evaluates the similarity in the feature space between generated and ground-truth motions, reflecting motion realism. Diversity (Div) measures motion variety via average pairwise feature distances among generated motions. All methods are evaluated 20 times with different random seeds, and we report the mean results with the 95% confidence interval.</p>
+          <p class="dst"><b>評価指標。</b> テキスト–モーションの整合性の評価には <span class="tnote">R-Precision（R@Top3 として報告）</span>と <span class="tnote">Multimodal Distance（MM Dist）</span>を用いる。具体的には、R-Precision はモーション埋め込みとテキスト埋め込みの間のユークリッド距離の順位を測り、MM Dist は各生成モーションと対応テキストの間の平均ユークリッド距離を計算する。<span class="tnote">FID</span> は生成モーションと正解モーションの特徴空間における類似度を評価し、動きの写実性を反映する。<span class="tnote">Diversity（Div）</span>は生成モーション間の平均ペアワイズ特徴距離によって動きの多様性を測る。全手法を異なる乱数シードで20回評価し、平均結果を95%信頼区間とともに報告する。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>R@Top3（R-Precision）</b>：テキストに最も合うモーションを上位3位以内に当てられた割合。<b>大きいほど良い</b>。</aside>
+          <aside class="sn"><b>MM Dist</b>：モーションとテキストの距離の平均。<b>小さいほど良い</b>（よく一致）。</aside>
+          <aside class="sn"><b>Diversity</b>：多様性。大小ではなく<b>GT（本物）に近いほど良い</b>（表中の「→」記号）。多すぎても少なすぎてもダメ。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>Inference Speed.</b> HINT takes about 1.1s to generate 16 future frames from a single window on a single NVIDIA GeForce RTX 3090 GPU, while DART† takes about 0.3s and InterMask* takes about 1.1s under the same conditions.</p>
+          <p class="dst"><b>推論速度。</b> HINT は、単一の NVIDIA GeForce RTX 3090 GPU 上で、1つの窓から16フレームの未来を生成するのに約 1.1 秒を要する。同条件で DART† は約 0.3 秒、InterMask* は約 1.1 秒である。</p>
+        </div>
+      </div>
+
+      <h3>4.1 Comparison with Baselines（ベースラインとの比較）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Tab. 1 presents the evaluation results. Among all compared methods, HINT achieves state-of-the-art FID scores of 3.100 on InterHuman and 0.278 on InterX, improving 2.054 and 0.121 over the second-best method, InterMask. This significant gain highlights the superior realism and naturalness of the motions generated by HINT, which can be primarily attributed to HINT's hierarchical interaction modeling strategy. It explicitly and comprehensively conditions on past motion histories and relative position relations between humans. As a result, within each sliding window, HINT is able to effectively capture and construct rich inter-human interactions.</p>
+          <p class="dst">表1 に評価結果を示す。比較した全手法の中で、HINT は InterHuman で 3.100、InterX で 0.278 という最高(SOTA)の FID を達成し、2番目に良い手法 InterMask をそれぞれ 2.054、0.121 上回る。この大幅な向上は、HINT が生成するモーションの優れた写実性と自然さを際立たせるものであり、主に HINT の階層的相互作用モデリング戦略に起因する。これは過去のモーション履歴と人物間の相対位置関係を明示的かつ包括的に条件付ける。その結果、各スライディングウィンドウ内で HINT は豊かな人物間相互作用を効果的に捉え、構築できる。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/hint/tab1_results.png" alt="Table 1: InterHumanとInterXの結果">
+        <figcaption><b>Table 1.</b> InterHuman と InterX での結果。→ はGTに近いほど良い、↑/↓ は高い/低いほど良い、± は95%信頼区間、<b>太字</b>は最良。InterMask* は InterMask のオンライン版、DART† は DART の2人版。HINT は FID で InterHuman 3.100・InterX 0.278 と最良を達成。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">For other metrics, HINT is consistently superior to online competitors InterMask* and DART†, while slightly inferior to the offline method InterMask. For instance, on InterHuman, compared to InterMask, HINT shows a small decrease of 0.011 in R@Top3 and 0.006 in MM Dist. As an autoregressive method, HINT does not perform global optimization, which inevitably leads to insufficient alignment with the global text command. Overall, these experiment results validate HINT's effectiveness.</p>
+          <p class="dst">その他の指標についても、HINT はオンラインの競合 InterMask* と DART† に一貫して優り、オフライン手法 InterMask にはわずかに劣る。例えば InterHuman では、InterMask と比べて HINT は R@Top3 で 0.011、MM Dist で 0.006 のわずかな低下を示す。自己回帰手法である HINT は<span class="tnote">大域最適化</span>を行わないため、大域的なテキストコマンドとの整合がどうしても不十分になる。総じて、これらの実験結果は HINT の有効性を裏づける。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>大域最適化をしない</b>：自己回帰は「窓ごと」に逐次生成するため、系列全体のテキストに対してまとめて最適化はしない。オフライン手法に R@Top3/MM Dist でわずかに劣る理由。代わりに可変長・ストリーミングが可能。</aside>
+        </div>
+      </div>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Fig. 5 shows qualitative comparisons of InterMask, InterMask*, DART†, and HINT trained on InterHuman with the same text descriptions. In (a), InterMask fails to generate the backward motion of the left person, InterMask* produces less natural movements, while both DART† and HINT align well with the text. In (b), InterMask and InterMask* fail to generate motions consistent with the semantics, DART† does not explicitly model interactions and thus shows weaker interaction quality, whereas HINT achieves superior semantic alignment, interaction effectiveness, and motion fluency. More visual results are provided in Appendix C. Videos are provided in Supplementary Materials.</p>
+          <p class="dst">図5 は、同じテキスト記述で InterHuman 上に学習した InterMask、InterMask*、DART†、HINT の定性比較を示す。(a) では、InterMask は左の人物の後退動作を生成できず、InterMask* はより不自然な動きを生み、一方 DART† と HINT はテキストとよく整合する。(b) では、InterMask と InterMask* は意味と整合する動きを生成できず、DART† は相互作用を明示的にモデル化しないため相互作用の質が弱い。これに対し HINT は、優れた意味整合・相互作用の有効性・動きの滑らかさを達成する。さらなる視覚的結果は付録 C に、動画は補足資料に示す。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/hint/fig5_qualitative.png" alt="Figure 5: 定性比較">
+        <figcaption><b>Figure 5.</b> InterHuman 上で同じテキストを与えた InterMask・InterMask*・DART†・HINT の定性比較（(a) 左、(b) 右）。赤い破線枠が失敗箇所。InterMask は後退動作の生成に失敗、InterMask* は不自然、DART† は相互作用が弱い。HINT が最も意味・相互作用・滑らかさで優れる。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src"><b>User Study.</b> To further evaluate the subjective quality of the generated results, we conducted a user study. Fifteen participants are invited to compare HINT against InterMask and DART† in terms of semantic alignment and motion fluency. Results are shown in Fig. 4. HINT received over 50% of the votes across all metrics.</p>
+          <p class="dst"><b>ユーザースタディ。</b> 生成結果の主観的品質をさらに評価するため、ユーザースタディを実施した。15名の参加者を招き、意味整合と動きの滑らかさの観点で HINT を InterMask・DART† と比較してもらった。結果は図4 に示す。HINT は全ての指標で過半数（50%超）の票を得た。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>図4の数値</b>：意味整合 59.0%、動きの滑らかさ 58.5%、総合 58.7% が HINT 支持。いずれも他2手法の合計より多い。</aside>
+        </div>
+      </div>
+
+      <figure class="tr-fig">
+        <img src="../../assets/img/hint/fig4_userstudy.png" alt="Figure 4: ユーザースタディ">
+        <figcaption><b>Figure 4.</b> HINT・DART†・InterMask のユーザースタディ。意味整合・動きの滑らかさ・総合のいずれでも HINT が過半数（59.0% / 58.5% / 58.7%）の支持を得た。</figcaption>
+      </figure>
+
+      <h3>4.2 Ablation Studies（アブレーション研究）</h3>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">Tab. 3 further compares our Canonicalized Latent Space (CLS) with the Joint Multi-Human Latent Space (JMLS) on the InterHuman dataset in terms of Reconstruction FID, MPJPE (Mean Per Joint Position Error), and MROE (Mean Relative Orientation Error), measuring reconstruction quality. For a fair comparison, we implement a motion VAE that directly encodes two-human motion trajectories as the JMLS baseline. The results demonstrate that CLS substantially outperforms JMLS in reconstruction quality (Recon FID: 0.307 vs. 7.783), highlighting that canonicalization enables more effective modeling of local human motion.</p>
+          <p class="dst">表3 は、再構成品質を測る <span class="tnote">Recon FID・MPJPE・MROE</span> の観点で、我々の正準化潜在空間(CLS)と共有多人数潜在空間(JMLS)を InterHuman データセット上でさらに比較する。公平な比較のため、2人のモーション軌跡を直接符号化する motion VAE を JMLS ベースラインとして実装した。結果は、CLS が再構成品質で JMLS を大幅に上回る（Recon FID：0.307 vs. 7.783）ことを示し、正準化が局所的な人体動作のより効果的なモデル化を可能にすることを際立たせる。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>Recon FID / MPJPE / MROE</b>：再構成（VAEで圧縮→復元）の正確さの指標。順に 特徴分布のずれ／関節位置の平均誤差／相対的な向きの平均誤差。いずれも<b>小さいほど良い</b>。</aside>
+        </div>
+      </div>
+
+      <figure class="tr-fig">
+        <img src="../../assets/img/hint/tab3_cls_jmls.png" alt="Table 3: CLS vs JMLS">
+        <figcaption><b>Table 3.</b> 正準化潜在空間 (CLS) と共有多人数潜在空間 (JMLS) の再構成品質の比較（InterHuman）。CLS は Recon FID 0.307 と、JMLS の 7.783 を大きく上回る。</figcaption>
+      </figure>
+
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">As shown in Tab. 2, we evaluate the contributions of HINT's key components, including the canonicalized latent space (CLS), local conditions (L), and global conditions (G). Replacing CLS with JMLS leads to a severe degradation in generation quality, with FID increasing from 3.100 to 5.274, underscoring its necessity. For local conditions, we remove individual components to assess their effectiveness. Excluding the history motion, step index, relative history, and word-level text embeddings results in slight R@Top3 drops of 0.012, 0.014, 0.025, and 0.000 (unchanged), respectively, compared to the full HINT (0.672). However, the corresponding FID values worsen significantly by 1.497, 0.124, 1.474, and 0.195. These consistent degradations verify that each local condition term provides complementary temporal or semantic cues and is indispensable for improving text-motion alignment and motion fidelity.</p>
+          <p class="dst">表2 に示すように、HINT の主要構成要素——正準化潜在空間(CLS)、局所条件(L)、大域条件(G)——の寄与を評価する。CLS を JMLS に置き換えると生成品質が大きく劣化し、FID は 3.100 から 5.274 へ増加して、その必要性を裏づける。局所条件については、個々の要素を取り除いてその有効性を評価する。履歴モーション・ステップ番号・相対履歴・単語レベルテキスト埋め込みを除くと、完全版 HINT（0.672）に対し R@Top3 はそれぞれ 0.012、0.014、0.025、0.000（変化なし）のわずかな低下にとどまる。しかし対応する FID はそれぞれ 1.497、0.124、1.474、0.195 と大きく悪化する。これら一貫した劣化は、各局所条件項が相補的な時間的・意味的手がかりを与え、テキスト–モーション整合と動きの忠実度の向上に不可欠であることを裏づける。</p>
+        </div>
+      </div>
+
+      <figure class="tr-fig wide">
+        <img src="../../assets/img/hint/tab2_ablation.png" alt="Table 2: 主要構成要素のアブレーション">
+        <figcaption><b>Table 2.</b> HINT の主要構成要素のアブレーション（InterHuman）。L/G は局所/大域条件。CLS を JMLS に置換すると FID が 3.100 → 5.274 に悪化。各局所・大域条件を外すといずれも FID が悪化し、特に履歴・相対履歴・系列インデックスの寄与が大きい。</figcaption>
+      </figure>
+
+      <div class="tr-block full">
+        <div class="tr-main">
+          <p class="src">For global conditions, the exclusion of compositional command embedding decreases R@Top3 by 0.003 and worsens FID by 0.241. Removing sequence index and total frame number has an even larger impact, with R@Top3 dropping by 0.005 and FID increasing by 0.443. These results highlight that both structural sequence information and compositional commands play crucial roles in ensuring coherent long-horizon motion generation and semantically grounded interaction synthesis.</p>
+          <p class="dst">大域条件については、合成コマンド埋め込みを除くと R@Top3 が 0.003 低下し、FID が 0.241 悪化する。系列インデックスと総フレーム数を取り除くとさらに影響が大きく、R@Top3 は 0.005 低下、FID は 0.443 増加する。これらの結果は、構造的な系列情報と合成コマンドの双方が、一貫した長期モーション生成と意味的に根拠づけられた相互作用合成を保証する上で重要な役割を果たすことを際立たせる。</p>
+        </div>
+      </div>
+
+      <!-- ========== 5 Conclusion ========== -->
+      <h2 id="tr-5"><span class="tr-sec-num">5</span>Conclusion（結論）</h2>
+      <div class="tr-block">
+        <div class="tr-main">
+          <p class="src">In this paper, we presented HINT, the first autoregressive framework for multi-human motion generation with hierarchical interaction modeling in diffusion. By disentangling local motion semantics from inter-person interactions in a canonicalized latent space and adopting a sliding-window strategy that integrates both local and global context, HINT effectively adapts to varying numbers of human participants while maintaining long-horizon coherence. Extensive experiments on public benchmarks demonstrate that HINT not only matches the performance of strong offline models but also significantly outperforms existing autoregressive baselines. In the future, an exciting direction is to extend our framework to incorporate objects and environments, enabling multi-human motion generation with object interactions. Text-driven generation of complex multi-agent behaviors in dynamic scenes remains a highly challenging yet impactful problem, and we believe HINT provides a strong foundation for advancing this line of research.</p>
+          <p class="dst">本論文では、拡散モデルの中で階層的に相互作用をモデル化する、複数人モーション生成のための初の自己回帰フレームワーク <strong>HINT</strong> を提示した。正準化潜在空間の中で局所的な動きの意味を人物間の相互作用から分離し、局所と大域の両方の文脈を統合するスライディングウィンドウ戦略を採用することで、HINT は長期的な一貫性を保ちながら人数の変化へ効果的に適応する。公開ベンチマークでの広範な実験により、HINT が強力なオフラインモデルに匹敵するだけでなく、既存の自己回帰ベースラインを大幅に上回ることが示された。将来の有望な方向として、物体や環境を取り込むよう枠組みを拡張し、物体との相互作用を伴う複数人モーション生成を可能にすることが挙げられる。動的なシーンにおける複雑なマルチエージェント行動のテキスト駆動生成は、依然として極めて挑戦的だが影響力の大きい問題であり、我々は HINT がこの研究の発展に強固な基盤を与えると信じている。</p>
+        </div>
+        <div class="tr-notes">
+          <aside class="sn"><b>今後の展望</b>：人だけでなく「物体・環境との相互作用（human-object/scene）」への拡張を挙げている。</aside>
+        </div>
+      </div>
+
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap"><a class="back" href="../../index.html">← 一覧へ戻る</a></div>
+  </footer>
+
+  <script src="../../assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,463 @@
+/* =========================================================
+   論文解説サイト 共通スタイル
+   - 軽量・シンプル・読みやすさ重視
+   - ライト/ダーク両対応（OS設定に追従）
+   ========================================================= */
+
+:root {
+  --bg:        #fafaf8;
+  --surface:   #ffffff;
+  --border:    #e7e5e0;
+  --text:      #1f1d1a;
+  --text-soft: #5c574f;
+  --text-mute: #908a7f;
+  --accent:    #3b6ea5;   /* 落ち着いた藍 */
+  --accent-2:  #2f8f7e;   /* 逐語訳モード用の緑 */
+  --tag-bg:    #f0eee9;
+  --code-bg:   #f4f2ee;
+  --shadow:    0 1px 3px rgba(0,0,0,.05), 0 6px 24px rgba(0,0,0,.04);
+  --maxw:      820px;
+  --radius:    12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #161513;
+    --surface:   #201e1b;
+    --border:    #33302b;
+    --text:      #ececea;
+    --text-soft: #b8b3aa;
+    --text-mute: #8a857c;
+    --accent:    #7fb0e0;
+    --accent-2:  #5fc4ae;
+    --tag-bg:    #2a2823;
+    --code-bg:   #2a2823;
+    --shadow:    0 1px 3px rgba(0,0,0,.3), 0 6px 24px rgba(0,0,0,.25);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+               "Hiragino Kaku Gothic ProN", "Noto Sans JP", Meiryo, sans-serif;
+  line-height: 1.8;
+  font-size: 16px;
+  letter-spacing: .01em;
+}
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 20px; }
+
+/* ---------- ヘッダー ---------- */
+.site-header {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  backdrop-filter: saturate(140%) blur(6px);
+}
+.site-header .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+}
+.site-header a.home {
+  font-weight: 700;
+  text-decoration: none;
+  color: var(--text);
+  letter-spacing: .02em;
+}
+.site-header .back {
+  text-decoration: none;
+  color: var(--text-soft);
+  font-size: .9rem;
+}
+.site-header .back:hover { color: var(--accent); }
+
+/* ---------- 一覧ページ ---------- */
+.hero {
+  padding: 48px 0 24px;
+}
+.hero h1 {
+  font-size: 1.7rem;
+  margin: 0 0 8px;
+  letter-spacing: .01em;
+}
+.hero p {
+  color: var(--text-soft);
+  margin: 0;
+}
+
+.paper-list { display: grid; gap: 16px; padding: 8px 0 64px; }
+
+.card {
+  display: block;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  text-decoration: none;
+  color: inherit;
+  box-shadow: var(--shadow);
+  transition: transform .12s ease, border-color .12s ease;
+}
+.card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.card .card-meta {
+  font-size: .78rem;
+  color: var(--text-mute);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.card h2 {
+  font-size: 1.12rem;
+  margin: 0 0 4px;
+  line-height: 1.45;
+}
+.card .title-ja {
+  color: var(--text-soft);
+  font-size: .92rem;
+  margin: 0 0 10px;
+}
+.card .summary {
+  color: var(--text-soft);
+  font-size: .92rem;
+  margin: 0 0 12px;
+}
+.card.placeholder {
+  opacity: .55;
+  border-style: dashed;
+  box-shadow: none;
+  cursor: default;
+}
+.card.placeholder:hover { transform: none; border-color: var(--border); }
+
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag {
+  font-size: .74rem;
+  background: var(--tag-bg);
+  color: var(--text-soft);
+  border-radius: 999px;
+  padding: 2px 10px;
+  letter-spacing: .02em;
+}
+
+/* ---------- 論文ページ ---------- */
+.paper-head { padding: 40px 0 8px; }
+.paper-head .card-meta {
+  font-size: .78rem; color: var(--text-mute);
+  letter-spacing: .04em; text-transform: uppercase; margin-bottom: 8px;
+}
+.paper-head h1 {
+  font-size: 1.5rem; line-height: 1.5; margin: 0 0 6px;
+}
+.paper-head .authors { color: var(--text-soft); font-size: .9rem; margin: 0 0 4px; }
+.paper-head .links { font-size: .88rem; margin-top: 8px; }
+.paper-head .links a { color: var(--accent); text-decoration: none; }
+.paper-head .links a:hover { text-decoration: underline; }
+
+/* ---------- モード切替セグメント（ヘッダー内に常駐） ---------- */
+.mode-switch {
+  display: flex;
+  gap: 6px;
+}
+.mode-switch button {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: all .12s ease;
+}
+.mode-switch button:hover { border-color: var(--accent); }
+.mode-switch button[aria-selected="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.mode-switch button[data-mode="translate"][aria-selected="true"] {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+/* 狭い画面ではヘッダーが詰まるので、ロゴと遷移先が同じ「← 一覧へ」を隠す */
+@media (max-width: 560px) {
+  .site-header .back { display: none; }
+  .mode-switch button { padding: 5px 10px; }
+}
+
+/* ---------- コンテンツ本体 ---------- */
+.mode-pane { display: none; padding-bottom: 96px; }
+.mode-pane.active { display: block; }
+
+.content h2 {
+  font-size: 1.25rem;
+  margin: 40px 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--border);
+  scroll-margin-top: 72px;
+}
+.content h3 { font-size: 1.05rem; margin: 28px 0 8px; }
+.content p { margin: 0 0 14px; }
+.content ul, .content ol { margin: 0 0 14px; padding-left: 1.4em; }
+.content li { margin: 4px 0; }
+
+.content a { color: var(--accent); }
+
+/* 補足・ポイント囲み（解説モード用） */
+.note {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 16px 0;
+  font-size: .94rem;
+}
+.note .label {
+  font-weight: 700; font-size: .8rem; color: var(--accent);
+  display: block; margin-bottom: 4px; letter-spacing: .04em;
+}
+.note.key   { border-left-color: var(--accent-2); }
+.note.key .label { color: var(--accent-2); }
+
+/* 用語 */
+.term { font-weight: 600; }
+code, .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: .88em;
+}
+
+/* 図のプレースホルダ */
+figure { margin: 20px 0; text-align: center; }
+figure img { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; }
+figure figcaption { font-size: .84rem; color: var(--text-mute); margin-top: 6px; }
+.fig-placeholder {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 40px 16px;
+  color: var(--text-mute);
+  font-size: .88rem;
+  background: var(--code-bg);
+}
+
+/* 注釈つき囲み色バリエーション */
+.note.warn   { border-left-color: #c08a3e; }
+.note.warn .label { color: #c08a3e; }
+
+/* ---------- 表（結果・比較） ---------- */
+.table-scroll { overflow-x: auto; margin: 18px 0; }
+table.data {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: .86rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+table.data th, table.data td {
+  padding: 7px 12px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data thead th {
+  color: var(--text-soft);
+  font-size: .78rem;
+  letter-spacing: .03em;
+  background: var(--code-bg);
+}
+table.data tbody tr:last-child td { border-bottom: none; }
+table.data tr.hl td { background: color-mix(in srgb, var(--accent) 10%, transparent); font-weight: 600; }
+table.data td.win { color: var(--accent-2); font-weight: 700; }
+table.data .grp { color: var(--text-mute); font-size: .76rem; text-transform: uppercase; letter-spacing: .04em; }
+
+/* ---------- 簡易フロー図（パイプライン） ---------- */
+.flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 10px;
+  margin: 20px 0;
+}
+.flow .box {
+  flex: 1 1 0;
+  min-width: 130px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: .86rem;
+}
+.flow .box b { display: block; color: var(--accent); font-size: .82rem; margin-bottom: 4px; }
+.flow .box .sub { color: var(--text-mute); font-size: .78rem; }
+.flow .arrow { align-self: center; color: var(--text-mute); font-size: 1.2rem; flex: 0 0 auto; }
+
+/* 横並び比較カード */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 18px 0; }
+.compare .col {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--surface);
+  font-size: .9rem;
+}
+.compare .col h4 { margin: 0 0 8px; font-size: .92rem; }
+.compare .col.bad h4 { color: var(--text-mute); }
+.compare .col.good { border-color: var(--accent-2); }
+.compare .col.good h4 { color: var(--accent-2); }
+.compare .col ul { margin: 0; padding-left: 1.2em; }
+.compare .col li { font-size: .86rem; }
+@media (max-width: 560px) { .compare { grid-template-columns: 1fr; } }
+
+/* 数式風インライン記号 */
+.kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; color: var(--text-soft); }
+
+/* ---------- 逐語訳モード: 原文/訳の対 ---------- */
+.tr-block { margin: 0 0 22px; }
+.tr-block .src {
+  color: var(--text-mute);
+  font-size: .88rem;
+  font-style: italic;
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+  margin: 0 0 8px;
+}
+.tr-block .dst { margin: 0; }
+.tr-sec-num { color: var(--text-mute); font-weight: 400; margin-right: .4em; }
+
+/* ---------- フッター ---------- */
+.site-footer {
+  border-top: 1px solid var(--border);
+  color: var(--text-mute);
+  font-size: .82rem;
+  padding: 24px 0 48px;
+}
+
+/* =========================================================
+   逐語訳モード: 本文を広げ、右マージンに「訳註」を置く
+   - 本文の真横に注が出る → 注を探しに行く必要がない
+   - 狭い画面では注が段落の下へ自動で畳まれる
+   ========================================================= */
+
+/* 逐語訳ペインだけ親(.wrap=820px)からはみ出して広く使う */
+.mode-pane[data-mode="translate"].active {
+  display: block;
+  max-width: 1180px;
+  width: 94vw;
+  position: relative;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+/* 逐語訳中に挿入する図（本文カラム幅にそろえ、左寄せ） */
+.tr-fig { margin: 6px 0 26px; max-width: 860px; }
+.tr-fig img {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+.tr-fig figcaption {
+  font-size: .82rem;
+  color: var(--text-mute);
+  margin-top: 7px;
+  line-height: 1.6;
+}
+.tr-fig figcaption b { color: var(--text-soft); }
+/* 横長の図・大きめの表は広めに */
+.tr-fig.wide { max-width: 1120px; }
+
+/* 節見出し・導入文は全幅 */
+.mode-pane[data-mode="translate"] > h2,
+.mode-pane[data-mode="translate"] > h3,
+.mode-pane[data-mode="translate"] > .tr-intro { max-width: 760px; }
+
+/* 1ブロック = 本文（左）+ 訳註（右マージン） */
+.tr-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  column-gap: 36px;
+  align-items: start;
+  margin: 0 0 24px;
+}
+/* 訳註が無いブロックは本文を全幅に（右の空白を作らない） */
+.tr-block.full { grid-template-columns: minmax(0, 760px); }
+.tr-main { min-width: 0; }
+
+/* 訳註カラム */
+.tr-notes { display: flex; flex-direction: column; gap: 10px; }
+.sn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-2);
+  border-radius: 8px;
+  padding: 9px 13px;
+  font-size: .82rem;
+  line-height: 1.65;
+  color: var(--text-soft);
+}
+.sn b { color: var(--accent-2); font-weight: 700; }
+.sn .en { color: var(--text-mute); font-style: italic; font-weight: 400; }
+
+/* 本文中、訳註のある語に控えめな点線下線 */
+.tnote { border-bottom: 1px dotted var(--accent-2); }
+
+/* 導入の凡例 */
+.tr-intro {
+  font-size: .9rem; color: var(--text-soft);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 16px; margin: 4px 0 20px;
+}
+.tr-intro b { color: var(--accent-2); }
+
+/* 数式ブロック */
+.eq {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 14px;
+  margin: 10px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .9rem;
+  overflow-x: auto;
+  position: relative;
+}
+.eq .num { color: var(--text-mute); float: right; padding-left: 12px; }
+
+/* 狭い画面: 注を段落の下へ畳む */
+@media (max-width: 920px) {
+  .mode-pane[data-mode="translate"].active {
+    width: auto; max-width: none; left: auto; transform: none;
+  }
+  .tr-block, .tr-block.full { grid-template-columns: 1fr; }
+  .tr-notes { margin-top: 4px; }
+}
+
+/* プレースホルダ注記 */
+.todo {
+  display: inline-block;
+  background: repeating-linear-gradient(45deg, var(--tag-bg), var(--tag-bg) 6px, transparent 6px, transparent 12px);
+  border: 1px dashed var(--text-mute);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: .8rem;
+  color: var(--text-mute);
+}
